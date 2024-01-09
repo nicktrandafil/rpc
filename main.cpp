@@ -298,7 +298,7 @@ public:
     /// \throw std::logic_error
     template <class T>
     void validate_argument() const noexcept(false) {
-        todo();
+        c->validate_argument(typeid(T));
     }
 
     /// \throw ProtocolError
@@ -309,7 +309,8 @@ public:
 private:
     struct Concept {
         virtual ~Concept() = default;
-        virtual void validate_arugment() noexcept(false) = 0;
+        /// \throw std::logic_error
+        virtual void validate_argument(std::type_info const&) noexcept(false) = 0;
     };
 
     template <class T>
@@ -317,7 +318,11 @@ private:
 
     template <class R, class T>
     struct Model<R(T)> : Concept {
-        void validate_arugment() noexcept(false) override {
+        void validate_argument(std::type_info const& actual) noexcept(false) override {
+            if (auto const& expected = typeid(T); expected != actual) {
+                throw std::logic_error(std::format(
+                        "expected {}, got {}", expected.name(), actual.name()));
+            }
         }
     };
 
