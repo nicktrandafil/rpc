@@ -278,14 +278,26 @@ struct ProtocolError : std::runtime_error {
     using runtime_error::runtime_error;
 };
 
-class Arguments {};
+class Argument {
+public:
+private:
+};
 
 class ReturnValue {};
 
+template <class T>
+struct Type {};
+
 class Prototype {
 public:
+    template <class T>
+    Prototype(Type<T>)
+            : c{new Model<T>{}} {
+    }
+
     /// \throw std::logic_error
-    void validate(Arguments const&) const noexcept(false) {
+    template <class T>
+    void validate_argument() const noexcept(false) {
         todo();
     }
 
@@ -293,6 +305,23 @@ public:
     void validate(ReturnValue const&) const noexcept(false) {
         todo();
     }
+
+private:
+    struct Concept {
+        virtual ~Concept() = default;
+        virtual void validate_arugment() noexcept(false) = 0;
+    };
+
+    template <class T>
+    struct Model;
+
+    template <class R, class T>
+    struct Model<R(T)> : Concept {
+        void validate_arugment() noexcept(false) override {
+        }
+    };
+
+    std::unique_ptr<Concept> c;
 };
 
 class Transport {
@@ -326,19 +355,22 @@ public:
     }
 
     /// \throw std::logic_error if method already defined
-    void declare_method(std::string&& name, Prototype&& proto) noexcept(false) {
+    template <class T>
+    void declare_method(std::string&& name) noexcept(false) {
+        auto proto = Prototype(Type<T>{});
         if (!remote_methods.emplace(std::move(name), std::move(proto)).second) {
             throw std::logic_error("method already defined");
         }
     }
 
-    ReturnValue call_method(std::string_view name, Arguments&& arguments) {
+    template <class T>
+    ReturnValue call_method(std::string_view name, T&&) {
         auto const it = remote_methods.find(name);
         if (it == remote_methods.end()) {
             throw std::logic_error(std::format("method {} not defined", name));
         }
 
-        it->second.validate(arguments);
+        it->second.validate_argument<std::remove_reference_t<T>>();
 
         todo();
     }
@@ -353,15 +385,15 @@ private:
     };
 
     std::unique_ptr<Transport> transport;
-    std::unordered_map<std::string, Prototype, TransparentHash, std::less<>>
+    std::unordered_map<std::string, Prototype, TransparentHash, std::equal_to<>>
             remote_methods;
     std::vector<Call> calls;
 };
 
 TEST_CASE("") {
     Rpc rpc{std::make_unique<ChannelTransport>()};
-    rpc.declare_method("hello", Prototype{});
-    rpc.call_method("hello", Arguments{});
+    rpc.declare_method<void(int)>("hello");
+    rpc.call_method("hello", 5);
 }
 
 } // namespace rpc
