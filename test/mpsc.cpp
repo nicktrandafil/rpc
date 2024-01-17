@@ -4,6 +4,6 @@
 
 using namespace rpc;
 
-TEST_CASE("channel") {
+TEST_CASE("construct", "[mpsc]") {
     auto [tx, rx] = mpsc::unbound_channel<int>();
 }
