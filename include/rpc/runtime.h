@@ -248,4 +248,6 @@ private:
     std::vector<std::function<void()>> tasks;
 };
 
+inline thread_local std::unique_ptr<Executor> current_executor;
+
 } // namespace rpc
