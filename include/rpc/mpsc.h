@@ -12,7 +12,7 @@ namespace rpc::mpsc {
 namespace detail {
 
 template <class T>
-class UnboundState : public std::enable_shared_from_this<UnboundState<T>> {
+class UnboundState {
 public:
     /// \throw std::bad_alloc
     void push(T value) noexcept(false) {
@@ -39,6 +39,7 @@ private:
     std::list<T> queue;
     std::mutex mutex;
     bool has_producer{true};
+    std::optional<ConditionalVariable> cv;
 };
 
 } // namespace detail

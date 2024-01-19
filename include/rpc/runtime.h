@@ -211,6 +211,17 @@ private:
     std::coroutine_handle<promise_type> coroutine;
 };
 
+class ConditionalVariable {
+public:
+    ConditionalVariable(ConditionalVariable const&) = delete;
+    ConditionalVariable& operator=(ConditionalVariable const&) = delete;
+
+    ConditionalVariable(ConditionalVariable&&) = delete;
+    ConditionalVariable& operator=(ConditionalVariable&&) = delete;
+
+private:
+};
+
 struct Executor {
     virtual void spawn(std::function<void()>&& task) = 0;
     virtual ~Executor() = default;
