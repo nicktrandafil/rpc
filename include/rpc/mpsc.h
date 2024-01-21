@@ -18,10 +18,11 @@ public:
     void push(T value) noexcept(false) {
         std::scoped_lock lock{mutex};
         queue.push_back(std::move(value));
+        cv.notify();
     }
 
     Task<std::optional<T>> pop() noexcept {
-        std::scoped_lock lock{mutex};
+        std::unique_lock lock{mutex};
         if (!queue.empty()) {
             auto ret = std::move(queue.front());
             queue.pop_front();
@@ -32,14 +33,18 @@ public:
             co_return std::nullopt;
         }
 
-        co_return todo();
+        co_await cv.wait(lock);
+
+        auto const ret = std::move(queue.front());
+        queue.pop_front();
+        co_return ret;
     }
 
 private:
     std::list<T> queue;
     std::mutex mutex;
     bool has_producer{true};
-    std::optional<ConditionalVariable> cv;
+    ConditionalVariable cv;
 };
 
 } // namespace detail
@@ -57,7 +62,7 @@ public:
     UnboundReceiver operator=(UnboundReceiver&&) = delete;
 
     Task<std::optional<T>> recv() noexcept {
-        co_return state->pop();
+        co_return co_await state->pop();
     }
 
 private:
@@ -88,7 +93,7 @@ public:
     UnboundSender& operator=(UnboundSender&&) = default;
 
     /// \throw std::bad_alloc, ClosedError
-    void send(T value) noexcept(false) {
+    void send(T value) const noexcept(false) {
         if (auto state = this->state.lock()) {
             state->push(std::move(value));
         } else {

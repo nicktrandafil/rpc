@@ -5,6 +5,11 @@
 #include <coroutine>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <thread>
+#include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -90,6 +95,8 @@ public:
     }
 
 private:
+    friend struct Executor;
+
     Task(std::coroutine_handle<promise_type> coroutine) noexcept
             : coroutine(coroutine) {
     }
@@ -191,6 +198,8 @@ public:
     }
 
 private:
+    friend struct Executor;
+
     Task(std::coroutine_handle<promise_type> coroutine) noexcept
             : coroutine(coroutine) {
     }
@@ -211,25 +220,95 @@ private:
     std::coroutine_handle<promise_type> coroutine;
 };
 
+struct Executor : public std::enable_shared_from_this<Executor> {
+    virtual void spawn(std::function<void()>&& task) = 0;
+    virtual void increment_work() = 0;
+    virtual void decrement_work() = 0;
+    virtual ~Executor() = default;
+
+protected:
+    template <class T>
+    void launch(Task<T>& task) const noexcept {
+        task.launch();
+    }
+
+    template <class T>
+    decltype(auto) get_result(T&& task) const noexcept {
+        return std::forward<T>(task).get_result();
+    }
+};
+
+inline thread_local std::shared_ptr<Executor> current_executor;
+
 class ConditionalVariable {
 public:
+    ConditionalVariable() = default;
+
     ConditionalVariable(ConditionalVariable const&) = delete;
     ConditionalVariable& operator=(ConditionalVariable const&) = delete;
 
     ConditionalVariable(ConditionalVariable&&) = delete;
     ConditionalVariable& operator=(ConditionalVariable&&) = delete;
 
+    void notify() noexcept {
+        if (auto const executor = this->executor.lock()) {
+            auto h = this->continuation;
+            this->continuation = nullptr;
+            executor->spawn([h] {
+                if (h) {
+                    h.resume();
+                }
+            });
+            this->executor.reset();
+        }
+    }
+
+    auto wait(std::unique_lock<std::mutex>& lock) noexcept {
+        struct Awaiter {
+            bool await_ready() const noexcept {
+                return false;
+            }
+
+            void await_resume() const noexcept {
+                lock->lock();
+                current_executor->decrement_work();
+            }
+
+            void await_suspend(std::coroutine_handle<> c) noexcept {
+                RPC_ASSERT(current_executor, Invariant{});
+                current_executor->increment_work();
+                outer->executor = current_executor;
+                outer->continuation = c;
+            }
+
+            ConditionalVariable* outer;
+            std::unique_lock<std::mutex>* lock;
+        };
+
+        return Awaiter{this, &lock};
+    }
+
 private:
+    std::coroutine_handle<> continuation;
+    std::weak_ptr<Executor> executor;
 };
 
-struct Executor {
-    virtual void spawn(std::function<void()>&& task) = 0;
-    virtual ~Executor() = default;
+template <class T>
+class JoinHandle {
+public:
+    void abort() const noexcept {
+        todo();
+    }
+
+    Task<T> wait() const noexcept {
+        co_return co_await task;
+    }
+
+private:
+    Task<T> task;
 };
 
-class ThisThreadExecutor final
-        : public Executor
-        , public std::enable_shared_from_this<ThisThreadExecutor> {
+class ThisThreadExecutor final : public Executor {
 public:
     ThisThreadExecutor() {
         tasks.reserve(r);
@@ -238,27 +317,54 @@ public:
     /// \throw std::bad_alloc
     template <class T>
     T block_on(Task<T>&& task) {
-        task.launch();
-        while (!tasks.empty()) {
-            std::vector<std::function<void()>> tasks2;
-            tasks2.reserve(r);
-            std::swap(tasks, tasks2);
-            for (auto& task : tasks2) {
-                std::move(task)();
+        launch(task);
+
+        while (true) {
+            // work
+            while (!tasks.empty()) {
+                std::vector<std::function<void()>> tasks2;
+                tasks2.reserve(r);
+                std::swap(tasks, tasks2);
+                for (auto& task : tasks2) {
+                    std::move(task)();
+                }
             }
+
+            if (work == 0) {
+                break;
+            }
+
+            std::this_thread::yield();
         }
-        return task.get_result();
+
+        return get_result(std::move(task));
     }
+
+    template <class T>
+    JoinHandle<T> spawn(Task<T>&& task) {
+        launch(task);
+        return JoinHandle<T>{std::move(task)};
+    }
+
+private:
+    template <class T>
+    friend class Task;
 
     void spawn(std::function<void()>&& task) override {
         tasks.push_back(std::move(task));
     }
 
-private:
+    void increment_work() override {
+        ++work;
+    }
+
+    void decrement_work() override {
+        --work;
+    }
+
     static constexpr size_t r = 10;
     std::vector<std::function<void()>> tasks;
+    size_t work{0};
 };
-
-inline thread_local std::unique_ptr<Executor> current_executor;
 
 } // namespace rpc
