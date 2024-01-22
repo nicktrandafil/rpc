@@ -23,8 +23,6 @@ TEST_CASE("construct and send many values", "[mpsc]") {
     ThisThreadExecutor executor;
     int counter = 0;
     executor.block_on([&]() -> Task<void> {
-        tx.send(5);
-
         executor.spawn([tx = std::move(tx)]() -> Task<void> {
             for (int i = 0; i < 10; ++i) {
                 tx.send(i);

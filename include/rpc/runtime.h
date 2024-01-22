@@ -55,11 +55,16 @@ public:
                     return false;
                 }
                 std::coroutine_handle<> await_suspend(std::coroutine_handle<>) noexcept {
-                    if (me->continuation) {
-                        return me->continuation;
-                    } else {
+                    if (!me->continuation) {
                         return std::noop_coroutine();
                     }
+
+                    if (me->canceled.test(std::memory_order_acquire)) {
+                        me->continuation.destroy();
+                        return std::noop_coroutine();
+                    }
+
+                    return me->continuation;
                 }
                 void await_resume() noexcept {
                 }
@@ -79,6 +84,7 @@ public:
 
         std::variant<std::monostate, T, std::exception_ptr> result;
         std::coroutine_handle<> continuation;
+        std::atomic_flag canceled = ATOMIC_FLAG_INIT;
     };
 
     bool await_ready() const noexcept {
@@ -200,6 +206,9 @@ public:
 private:
     friend struct Executor;
 
+    template <class>
+    friend class JoinHandle;
+
     Task(std::coroutine_handle<promise_type> coroutine) noexcept
             : coroutine(coroutine) {
     }
@@ -296,8 +305,12 @@ private:
 template <class T>
 class JoinHandle {
 public:
+    explicit JoinHandle(Task<T>&& task)
+            : task{std::move(task)} {
+    }
+
     void abort() const noexcept {
-        todo();
+        task.coroutine.promise().test_and_set(std::memory_order_release);
     }
 
     Task<T> wait() const noexcept {
