@@ -100,23 +100,21 @@ public:
         return get_result();
     }
 
-private:
-    friend struct Executor;
-
-    Task(std::coroutine_handle<promise_type> coroutine) noexcept
-            : coroutine(coroutine) {
-    }
-
-    void launch() {
-        RPC_ASSERT(coroutine, Invariant{});
-        coroutine.resume();
-    }
-
     T get_result() {
         if (coroutine.promise().result.index() == 2) {
             std::rethrow_exception(get<2>(std::move(coroutine.promise().result)));
         }
         return get<1>(std::move(coroutine.promise().result));
+    }
+
+    void resume() {
+        RPC_ASSERT(coroutine, Invariant{});
+        coroutine.resume();
+    }
+
+private:
+    Task(std::coroutine_handle<promise_type> coroutine) noexcept
+            : coroutine(coroutine) {
     }
 
 private:
@@ -203,26 +201,21 @@ public:
         get_result();
     }
 
-private:
-    friend struct Executor;
-
-    template <class>
-    friend class JoinHandle;
-
-    Task(std::coroutine_handle<promise_type> coroutine) noexcept
-            : coroutine(coroutine) {
-    }
-
-    void launch() {
-        RPC_ASSERT(coroutine, Invariant{});
-        coroutine.resume();
-    }
-
     void get_result() {
         if (coroutine.promise().result.index() == 2) {
             std::rethrow_exception(get<2>(std::move(coroutine.promise().result)));
         }
         RPC_ASSERT(coroutine.promise().result.index() == 1, Invariant{});
+    }
+
+    void resume() {
+        RPC_ASSERT(coroutine, Invariant{});
+        coroutine.resume();
+    }
+
+private:
+    Task(std::coroutine_handle<promise_type> coroutine) noexcept
+            : coroutine(coroutine) {
     }
 
 private:
@@ -234,17 +227,6 @@ struct Executor : public std::enable_shared_from_this<Executor> {
     virtual void increment_work() = 0;
     virtual void decrement_work() = 0;
     virtual ~Executor() = default;
-
-protected:
-    template <class T>
-    void launch(Task<T>& task) const noexcept {
-        task.launch();
-    }
-
-    template <class T>
-    decltype(auto) get_result(T&& task) const noexcept {
-        return std::forward<T>(task).get_result();
-    }
 };
 
 inline thread_local std::shared_ptr<Executor> current_executor;
@@ -330,7 +312,7 @@ public:
     /// \throw std::bad_alloc
     template <class T>
     T block_on(Task<T>&& task) {
-        launch(task);
+        task.resume();
 
         while (true) {
             // work
@@ -350,19 +332,16 @@ public:
             std::this_thread::yield();
         }
 
-        return get_result(std::move(task));
+        return std::move(task).get_result();
     }
 
     template <class T>
     JoinHandle<T> spawn(Task<T>&& task) {
-        launch(task);
+        task.resume();
         return JoinHandle<T>{std::move(task)};
     }
 
 private:
-    template <class T>
-    friend class Task;
-
     void spawn(std::function<void()>&& task) override {
         tasks.push_back(std::move(task));
     }
