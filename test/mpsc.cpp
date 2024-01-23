@@ -18,7 +18,8 @@ TEST_CASE("construct and send one value", "[mpsc]") {
     REQUIRE(counter == 1);
 }
 
-TEST_CASE("construct and send many values", "[mpsc]") {
+TEST_CASE("construct and send many values, conditional variable isn't really involved",
+          "[mpsc]") {
     auto [tx, rx] = mpsc::unbound_channel<int>();
     ThisThreadExecutor executor;
     int counter = 0;

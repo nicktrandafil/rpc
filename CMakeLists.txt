@@ -11,6 +11,17 @@ add_library(rpc INTERFACE
     include/rpc/runtime.h
 )
 set_target_properties(rpc PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+target_include_directories(rpc INTERFACE include)
+
+option(RPC_ABORT_ON_INVARIANT_VIOLATION "Abort on invariant violation" OFF)
+if(RPC_ABORT_ON_INVARIANT_VIOLATION)
+    target_compile_definitions(rpc INTERFACE RPC_ABORT_ON_INVARIANT_VIOLATION)
+endif()
+
+option(RPC_ABORT_ON_TODO "Abort on RPC_TODO" OFF)
+if(RPC_ABORT_ON_TODO)
+    target_compile_definitions(rpc INTERFACE RPC_ABORT_ON_TODO)
+endif()
 
 add_executable(test_rpc 
     test/mpsc.cpp
@@ -18,12 +29,11 @@ add_executable(test_rpc
     test/runtime.cpp
 )
 find_package(Catch2 REQUIRED QUIET)
-target_link_libraries(test_rpc PRIVATE Catch2::Catch2WithMain)
-target_include_directories(test_rpc PRIVATE include)
+target_link_libraries(test_rpc PRIVATE rpc Catch2::Catch2WithMain)
 set_target_build_settings(test_rpc)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES ${CMAKE_BINARY_DIR}/dcov)
+    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES ${CMAKE_BINARY_DIR}/dcov "${CMAKE_BINARY_DIR}/cov.sh")
     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/cov.sh
         COMMAND ${CMAKE_COMMAND} -E copy ${PROJECT_SOURCE_DIR}/script/cov.sh ${CMAKE_BINARY_DIR}
         DEPENDS script/cov.sh
