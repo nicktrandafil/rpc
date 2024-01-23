@@ -47,6 +47,12 @@ struct Invariant {
     }
 };
 
+struct UnlikelyAbort {
+    [[noreturn]] void failed(std::source_location const&) {
+        std::abort();
+    }
+};
+
 #define RPC_ASSERT(expr, module)                                                         \
     if (!(expr)) {                                                                       \
         module.failed(std::source_location::current());                                  \
