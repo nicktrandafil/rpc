@@ -61,12 +61,6 @@ public:
                     if (!me->continuation) {
                         return std::noop_coroutine();
                     }
-
-                    if (me->canceled.test(std::memory_order_acquire)) {
-                        me->continuation.destroy();
-                        return std::noop_coroutine();
-                    }
-
                     return me->continuation;
                 }
                 void await_resume() noexcept {
@@ -87,7 +81,6 @@ public:
 
         std::variant<std::monostate, T, std::exception_ptr> result;
         std::coroutine_handle<> continuation;
-        std::atomic_flag canceled = ATOMIC_FLAG_INIT;
     };
 
     bool await_ready() const noexcept {
@@ -400,10 +393,12 @@ public:
                     ev.data.fd = fd;
                     ev.data.ptr = handle.address();
                     epoll_ctl(io->epollfd, EPOLL_CTL_MOD, fd, &ev);
+                    current_executor->increment_work();
                     io->poll();
                 }
             }
             void await_resume() noexcept {
+                current_executor->decrement_work();
             }
 
             int fd;
