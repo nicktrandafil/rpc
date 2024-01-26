@@ -6,9 +6,11 @@ include(cmake/common.cmake)
 
 add_library(rpc INTERFACE 
     include/rpc/contract.h
+    include/rpc/log.h
     include/rpc/mpsc.h
     include/rpc/rpc.h
     include/rpc/runtime.h
+    include/rpc/scope_exit.h
 )
 set_target_properties(rpc PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 target_include_directories(rpc INTERFACE include)

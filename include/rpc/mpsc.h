@@ -94,7 +94,7 @@ public:
 
     /// \throw std::bad_alloc, ClosedError
     void send(T value) const noexcept(false) {
-        if (auto state = this->state.lock()) {
+        if (auto const state = this->state.lock()) {
             state->push(std::move(value));
         } else {
             throw ClosedError{};

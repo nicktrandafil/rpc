@@ -51,7 +51,7 @@ TEST_CASE("construct and send many values, conditional variable is involved", "[
     executor->block_on([&]() -> Task<void> {
         executor->spawn([tx = std::move(tx)]() -> Task<void> {
             for (int i = 0; i < 10; ++i) {
-                co_await sleep(5ms);
+                co_await Sleep{5ms};
                 tx.send(i);
             }
         }());
