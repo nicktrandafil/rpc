@@ -220,6 +220,7 @@ private:
 
 struct Executor : public std::enable_shared_from_this<Executor> {
     virtual void spawn(std::function<void()>&& task) = 0;
+    virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
     virtual void increment_work() = 0;
     virtual void decrement_work() = 0;
     virtual ~Executor() = default;
@@ -239,14 +240,11 @@ public:
 
     void notify() noexcept {
         if (auto const executor = this->executor.lock()) {
-            auto h = this->continuation;
-            this->continuation = nullptr;
-            executor->spawn([h] {
+            executor->spawn([h = this->continuation] {
                 if (h) {
                     h.resume();
                 }
             });
-            this->executor.reset();
         }
     }
 
@@ -264,11 +262,18 @@ public:
             void await_suspend(std::coroutine_handle<> c) noexcept {
                 RPC_ASSERT(current_executor, Invariant{});
                 current_executor->increment_work();
-                outer->executor = current_executor;
-                outer->continuation = c;
+                cv->executor = current_executor;
+                cv->continuation = c;
             }
 
-            ConditionalVariable* outer;
+            ~Awaiter() {
+                RPC_ASSERT(current_executor == cv->executor.lock(), Invariant{});
+                current_executor->decrement_work();
+                cv->continuation = nullptr;
+                cv->executor.reset();
+            }
+
+            ConditionalVariable* cv;
             std::unique_lock<std::mutex>* lock;
         };
 
@@ -300,32 +305,65 @@ private:
 };
 
 class ThisThreadExecutor final : public Executor {
-public:
     ThisThreadExecutor() {
         tasks.reserve(r);
+    }
+
+public:
+    static std::shared_ptr<ThisThreadExecutor> construct() {
+        return std::shared_ptr<ThisThreadExecutor>(new ThisThreadExecutor{});
     }
 
     /// \throw std::bad_alloc
     template <class T>
     T block_on(Task<T>&& task) {
+        current_executor = shared_from_this();
         task.resume();
-
         while (true) {
-            // work
-            while (!tasks.empty()) {
-                std::vector<std::function<void()>> tasks2;
+            using std::chrono_literals::operator""ms;
+            using std::chrono::steady_clock;
+
+            do {
+                std::vector<Work> tasks2;
                 tasks2.reserve(r);
                 std::swap(tasks, tasks2);
                 for (auto& task : tasks2) {
                     std::move(task)();
                 }
-            }
 
-            if (work == 0) {
+                auto const now = steady_clock::now();
+                auto const it =
+                        std::partition(delayed_tasks.begin(),
+                                       delayed_tasks.end(),
+                                       [now](auto const& p) { return now < p.second; });
+
+                std::vector<DelayedWork> delayed_tasks2{
+                        std::make_move_iterator(it),
+                        std::make_move_iterator(delayed_tasks.end())};
+
+                for (auto& task : delayed_tasks2) {
+                    std::move(task).first();
+                }
+            } while (!tasks.empty());
+
+            if (delayed_tasks.empty() && work == 0) {
                 break;
             }
 
+            auto const now = steady_clock::now() + 10ms;
             std::this_thread::yield();
+
+            auto const soon_work = std::min_element(delayed_tasks.begin(),
+                                                    delayed_tasks.end(),
+                                                    [](auto const& lhs, auto const& rhs) {
+                                                        return lhs.second < rhs.second;
+                                                    });
+
+            auto const soon = soon_work != delayed_tasks.end()
+                                    ? std::min(now, soon_work->second)
+                                    : now;
+
+            std::this_thread::sleep_until(soon);
         }
 
         return std::move(task).get_result();
@@ -342,6 +380,11 @@ private:
         tasks.push_back(std::move(task));
     }
 
+    void spawn(std::function<void()>&& task, std::chrono::milliseconds after) override {
+        delayed_tasks.emplace_back(std::move(task),
+                                   std::chrono::steady_clock::now() + after);
+    }
+
     void increment_work() override {
         ++work;
     }
@@ -350,8 +393,13 @@ private:
         --work;
     }
 
+    using Work = std::function<void()>;
+    using DelayedWork =
+            std::pair<std::function<void()>, std::chrono::steady_clock::time_point>;
+
     static constexpr size_t r = 10;
-    std::vector<std::function<void()>> tasks;
+    std::vector<Work> tasks;
+    std::vector<DelayedWork> delayed_tasks;
     size_t work{0};
 };
 
@@ -393,12 +441,10 @@ public:
                     ev.data.fd = fd;
                     ev.data.ptr = handle.address();
                     epoll_ctl(io->epollfd, EPOLL_CTL_MOD, fd, &ev);
-                    current_executor->increment_work();
                     io->poll();
                 }
             }
             void await_resume() noexcept {
-                current_executor->decrement_work();
             }
 
             int fd;
@@ -422,14 +468,19 @@ public:
 
 private:
     void notify_readable(std::coroutine_handle<> coro) {
-        executor->spawn([coro] { coro.resume(); });
+        executor->spawn([coro] {
+            if (coro) {
+                coro.resume();
+            }
+        });
     }
 
     void poll() {
         auto option_n = epoll_wait(epollfd, events.data(), 1, 0);
         RPC_ASSERT(0 <= option_n, UnlikelyAbort{});
         if (option_n == 0) {
-            executor->spawn([self = shared_from_this()] { self->poll(); });
+            executor->spawn([self = shared_from_this()] { self->poll(); },
+                            std::chrono::milliseconds{10});
         } else {
             for (size_t i = 0, n = static_cast<size_t>(option_n); i < n; ++i) {
                 if (events[i].events & EPOLLIN) {
@@ -447,5 +498,31 @@ private:
     int epollfd;
     std::array<epoll_event, 1> events;
 };
+
+inline auto sleep(std::chrono::milliseconds duration) {
+    struct Awaiter {
+        bool await_ready() const noexcept {
+            return false;
+        }
+        void await_suspend(std::coroutine_handle<> handle) {
+            if (auto const executor = this->executor.lock()) {
+                executor->spawn(
+                        [handle] {
+                            if (handle) {
+                                handle.resume();
+                            }
+                        },
+                        duration);
+            }
+        }
+        void await_resume() noexcept {
+        }
+
+        std::chrono::milliseconds duration;
+        std::weak_ptr<Executor> executor;
+    };
+
+    return Awaiter{duration, current_executor};
+}
 
 } // namespace rpc
