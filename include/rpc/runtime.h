@@ -5,8 +5,10 @@
 #include <sys/epoll.h>
 
 #include <coroutine>
+#include <cstdio>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -22,10 +24,13 @@ class CoRefRecord {
 public:
     void inc_ref() noexcept {
         ++refs;
+        std::cout << this << " inc: " << refs << "\n";
     }
 
     size_t dec_ref() noexcept {
-        return --refs;
+        --refs;
+        std::cout << this << " dec: " << refs << "\n";
+        return refs;
     }
 
 private:
@@ -44,6 +49,7 @@ public:
 
     ~CoRef() noexcept {
         if (co && co.promise().dec_ref() == 0) {
+            std::cout << "CoRef\n";
             co.destroy();
         }
     }
@@ -111,6 +117,7 @@ public:
 
     ~ErasedCoRef() noexcept {
         if (co && dec_ref(co.address()) == 0) {
+            std::cout << "ErasedCoRef\n";
             destroy(co.address());
         }
     }
@@ -540,7 +547,9 @@ public:
             executor->spawn(
                     [waiting = ErasedCoRef{waiting}]() mutable {
                         if (waiting) {
+                            std::cout << "resuming1\n";
                             waiting->resume();
+                            std::cout << "resuming2\n";
                         }
                     },
                     dur);
