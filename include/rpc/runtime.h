@@ -24,13 +24,10 @@ class CoRefRecord {
 public:
     void inc_ref() noexcept {
         ++refs;
-        std::cout << this << " inc: " << refs << "\n";
     }
 
     size_t dec_ref() noexcept {
-        --refs;
-        std::cout << this << " dec: " << refs << "\n";
-        return refs;
+        return --refs;
     }
 
 private:
@@ -49,7 +46,6 @@ public:
 
     ~CoRef() noexcept {
         if (co && co.promise().dec_ref() == 0) {
-            std::cout << "~CoRef\n";
             co.destroy();
         }
     }
@@ -117,7 +113,6 @@ public:
 
     ~ErasedCoRef() noexcept {
         if (co && dec_ref(co.address()) == 0) {
-            std::cout << "~ErasedCoRef\n";
             destroy(co.address());
         }
     }
@@ -544,22 +539,15 @@ public:
     }
     template <class T>
     void await_suspend(std::coroutine_handle<T> waiting) {
-        std::cout << "suspending\n";
         if (auto const executor = this->executor.lock()) {
             executor->spawn(
                     [waiting = ErasedCoRef{waiting}]() mutable {
-                        std::cout << "resuming1\n";
                         waiting->resume();
-                        std::cout << "resuming2\n";
                     },
                     dur);
         }
     }
     void await_resume() noexcept {
-    }
-
-    ~Sleep() {
-        std::cout << "~Sleep\n";
     }
 
 private:
