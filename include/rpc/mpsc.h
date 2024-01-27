@@ -101,6 +101,10 @@ public:
         }
     }
 
+    ~UnboundSender() {
+        std::cout << "~UnboundSender(this=" << this << ")\n";
+    }
+
 private:
     template <class U>
     friend std::pair<UnboundSender<U>, UnboundReceiver<U>> unbound_channel() noexcept(

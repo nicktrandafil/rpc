@@ -1,5 +1,7 @@
 #include "rpc/mpsc.h"
 
+#include <rpc/scope_exit.h>
+
 #include <catch2/catch_all.hpp>
 
 using namespace rpc;
@@ -49,13 +51,21 @@ TEST_CASE("construct and send many values, conditional variable is involved", "[
     int counter = 0;
     auto const start = std::chrono::steady_clock::now();
     executor->block_on([&]() -> Task<void> {
-        executor->spawn([tx = std::move(tx)]() -> Task<void> {
+        executor->spawn([](auto tx) -> Task<void> {
             for (int i = 0; i < 10; ++i) {
-                // scope exit
+                std::format_to(std::ostreambuf_iterator{std::cout},
+                               "1. for i = {}, tx = {}\n",
+                               i,
+                               static_cast<void const*>(&tx));
+                RPC_SCOPE_EXIT {
+                    std::cout << "scope exit for i = " << i << "\n";
+                };
                 co_await Sleep{5ms};
+                std::cout << "2. for i = " << i << "\n";
                 tx.send(i);
+                std::cout << "3. for i = " << i << "\n";
             }
-        }());
+        }(std::move(tx)));
 
         for (int i = 0; i < 10; ++i) {
             auto const x = co_await rx.recv();
@@ -65,7 +75,6 @@ TEST_CASE("construct and send many values, conditional variable is involved", "[
 
         co_return;
     }());
-
     REQUIRE(counter == 10);
     auto const dur = std::chrono::steady_clock::now() - start;
     REQUIRE(50ms <= dur);

@@ -49,7 +49,7 @@ public:
 
     ~CoRef() noexcept {
         if (co && co.promise().dec_ref() == 0) {
-            std::cout << "CoRef\n";
+            std::cout << "~CoRef\n";
             co.destroy();
         }
     }
@@ -117,7 +117,7 @@ public:
 
     ~ErasedCoRef() noexcept {
         if (co && dec_ref(co.address()) == 0) {
-            std::cout << "ErasedCoRef\n";
+            std::cout << "~ErasedCoRef\n";
             destroy(co.address());
         }
     }
@@ -468,6 +468,7 @@ public:
                 std::vector<DelayedWork> delayed_tasks2{
                         std::make_move_iterator(it),
                         std::make_move_iterator(delayed_tasks.end())};
+                delayed_tasks.erase(it, delayed_tasks.end());
 
                 for (auto& task : delayed_tasks2) {
                     std::move(task).first();
@@ -543,19 +544,22 @@ public:
     }
     template <class T>
     void await_suspend(std::coroutine_handle<T> waiting) {
+        std::cout << "suspending\n";
         if (auto const executor = this->executor.lock()) {
             executor->spawn(
                     [waiting = ErasedCoRef{waiting}]() mutable {
-                        if (waiting) {
-                            std::cout << "resuming1\n";
-                            waiting->resume();
-                            std::cout << "resuming2\n";
-                        }
+                        std::cout << "resuming1\n";
+                        waiting->resume();
+                        std::cout << "resuming2\n";
                     },
                     dur);
         }
     }
     void await_resume() noexcept {
+    }
+
+    ~Sleep() {
+        std::cout << "~Sleep\n";
     }
 
 private:
