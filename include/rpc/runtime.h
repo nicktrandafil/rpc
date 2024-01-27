@@ -367,9 +367,9 @@ public:
 
     void notify() noexcept {
         if (auto const executor = this->executor.lock()) {
-            executor->spawn([h = this->continuation]() mutable {
-                if (h) {
-                    h->resume();
+            executor->spawn([c = this->continuation]() mutable {
+                if (c) {
+                    c->resume();
                 }
             });
         }
@@ -386,8 +386,6 @@ private:
         }
 
         void await_resume() const noexcept {
-            lock->lock();
-            current_executor->decrement_work();
         }
 
         template <class U>
@@ -396,6 +394,7 @@ private:
             current_executor->increment_work();
             cv->executor = current_executor;
             cv->continuation = ErasedCoRef{c};
+            lock->unlock();
         }
 
         ~Awaiter() {
@@ -403,6 +402,7 @@ private:
             current_executor->decrement_work();
             cv->continuation = ErasedCoRef{};
             cv->executor.reset();
+            lock->lock();
         }
 
         ConditionalVariable* cv;
