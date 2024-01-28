@@ -97,13 +97,13 @@ public:
     template <class T>
     explicit ErasedCoRef(std::coroutine_handle<T> co) noexcept
             : co{co}
-            , inc_ref{[](void* co) {
+            , inc_ref{+[](void* co) {
                 std::coroutine_handle<T>::from_address(co).promise().inc_ref();
             }}
-            , dec_ref{[](void* co) {
+            , dec_ref{+[](void* co) {
                 return std::coroutine_handle<T>::from_address(co).promise().dec_ref();
             }}
-            , destroy{[](void* co) {
+            , destroy{+[](void* co) {
                 std::coroutine_handle<T>::from_address(co).destroy();
             }} {
         if (co) {
@@ -160,10 +160,14 @@ public:
     }
 
 private:
+    using IncRef = void (*)(void*);
+    using DecRef = size_t (*)(void*);
+    using Destroy = void (*)(void*);
+
     std::coroutine_handle<> co = nullptr;
-    std::function<void(void*)> inc_ref;
-    std::function<size_t(void*)> dec_ref;
-    std::function<void(void*)> destroy;
+    IncRef inc_ref;
+    DecRef dec_ref;
+    Destroy destroy;
 };
 
 template <class T = void>
@@ -541,9 +545,7 @@ public:
     void await_suspend(std::coroutine_handle<T> waiting) {
         if (auto const executor = this->executor.lock()) {
             executor->spawn(
-                    [waiting = ErasedCoRef{waiting}]() mutable {
-                        waiting->resume();
-                    },
+                    [waiting = ErasedCoRef{waiting}]() mutable { waiting->resume(); },
                     dur);
         }
     }
