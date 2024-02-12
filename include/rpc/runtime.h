@@ -18,19 +18,62 @@
 #include <variant>
 #include <vector>
 
+// hypothesis:
+// * a coroutine can have at most two references to it
+
 namespace rpc {
 
-class CoRefRecord {
+class CoWeakRefRecord {
 public:
-    void inc_ref() noexcept {
+    explicit CoWeakRefRecord(void* ptr) noexcept
+            : ptr{ptr} {
+    }
+
+    void inc_refs() noexcept {
         ++refs;
     }
 
-    size_t dec_ref() noexcept {
+    size_t dec_refs() noexcept {
         return --refs;
     }
 
+    size_t get_refs() const noexcept {
+        return refs;
+    }
+
+    void* get_ptr() const noexcept {
+        return ptr;
+    }
+
+    void reset_ptr() noexcept {
+        ptr = nullptr;
+    }
+
 private:
+    void* ptr = nullptr;
+    size_t refs = 0;
+};
+
+class CoRefRecord {
+public:
+    explicit CoRefRecord(void* co) noexcept(false)
+            : weak{new CoWeakRefRecord{co}} {
+    }
+
+    void inc_refs() noexcept {
+        ++refs;
+    }
+
+    size_t dec_refs() noexcept {
+        return --refs;
+    }
+
+    CoWeakRefRecord* get_weak() noexcept {
+        return weak;
+    }
+
+private:
+    CoWeakRefRecord* weak;
     size_t refs = 0;
 };
 
@@ -40,12 +83,17 @@ public:
     explicit CoRef(std::coroutine_handle<T> co) noexcept
             : co{co} {
         if (co) {
-            co.promise().inc_ref();
+            co.promise().inc_refs();
         }
     }
 
     ~CoRef() noexcept {
-        if (co && co.promise().dec_ref() == 0) {
+        if (co && co.promise().dec_refs() == 0) {
+            if (co.promise().get_weak()->get_refs() == 0) {
+                delete co.promise().get_weak();
+            } else {
+                co.promise().get_weak()->reset_ptr();
+            }
             co.destroy();
         }
     }
@@ -53,7 +101,7 @@ public:
     CoRef(CoRef const& rhs) noexcept
             : co{rhs.co} {
         if (co) {
-            co.promise().inc_ref();
+            co.promise().inc_refs();
         }
     }
 
@@ -97,33 +145,55 @@ public:
     template <class T>
     explicit ErasedCoRef(std::coroutine_handle<T> co) noexcept
             : co{co}
-            , inc_ref{+[](void* co) {
-                std::coroutine_handle<T>::from_address(co).promise().inc_ref();
+            , inc_refs{+[](void* co) {
+                std::coroutine_handle<T>::from_address(co).promise().inc_refs();
             }}
-            , dec_ref{+[](void* co) {
-                return std::coroutine_handle<T>::from_address(co).promise().dec_ref();
+            , dec_refs{+[](void* co) {
+                return std::coroutine_handle<T>::from_address(co).promise().dec_refs();
             }}
             , destroy{+[](void* co) {
                 std::coroutine_handle<T>::from_address(co).destroy();
+            }}
+            , get_weak_refs{+[](void* co) {
+                return std::coroutine_handle<T>::from_address(co)
+                        .promise()
+                        .get_weak()
+                        ->get_refs();
+            }}
+            , destroy_weak_record{+[](void* co) {
+                delete std::coroutine_handle<T>::from_address(co).promise().get_weak();
+            }}
+            , reset_weak_ptr{+[](void* co) {
+                std::coroutine_handle<T>::from_address(co)
+                        .promise()
+                        .get_weak()
+                        ->reset_ptr();
             }} {
         if (co) {
-            co.promise().inc_ref();
+            co.promise().inc_refs();
         }
     }
 
     ~ErasedCoRef() noexcept {
-        if (co && dec_ref(co.address()) == 0) {
+        if (co && dec_refs(co.address()) == 0) {
+            if (get_weak_refs(co.address()) == 0) {
+                destroy_weak_record(co.address());
+            } else {
+                reset_weak_ptr(co.address());
+            }
             destroy(co.address());
         }
     }
 
     ErasedCoRef(ErasedCoRef const& rhs) noexcept
             : co{rhs.co}
-            , inc_ref{rhs.inc_ref}
-            , dec_ref{rhs.dec_ref}
-            , destroy{rhs.destroy} {
+            , inc_refs{rhs.inc_refs}
+            , dec_refs{rhs.dec_refs}
+            , destroy{rhs.destroy}
+            , get_weak_refs{rhs.get_weak_refs}
+            , destroy_weak_record{rhs.destroy_weak_record} {
         if (co) {
-            inc_ref(co.address());
+            inc_refs(co.address());
         }
     }
 
@@ -135,9 +205,11 @@ public:
 
     ErasedCoRef(ErasedCoRef&& rhs) noexcept
             : co{rhs.co}
-            , inc_ref{rhs.inc_ref}
-            , dec_ref{rhs.dec_ref}
-            , destroy{rhs.destroy} {
+            , inc_refs{rhs.inc_refs}
+            , dec_refs{rhs.dec_refs}
+            , destroy{rhs.destroy}
+            , get_weak_refs{rhs.get_weak_refs}
+            , destroy_weak_record{rhs.destroy_weak_record} {
         rhs.co = nullptr;
     }
 
@@ -164,10 +236,75 @@ private:
     using DecRef = size_t (*)(void*);
     using Destroy = void (*)(void*);
 
+    using GetWeakRefs = size_t (*)(void*);
+    using DestroyWeakRef = void (*)(void*);
+    using ResetWeakPtr = void (*)(void*);
+
     std::coroutine_handle<> co = nullptr;
-    IncRef inc_ref;
-    DecRef dec_ref;
+    IncRef inc_refs;
+    DecRef dec_refs;
     Destroy destroy;
+    GetWeakRefs get_weak_refs;
+    DestroyWeakRef destroy_weak_record;
+    ResetWeakPtr reset_weak_ptr;
+};
+
+class ErasedCoWeakRef {
+public:
+    template <class T>
+    explicit ErasedCoWeakRef(std::coroutine_handle<T> co) noexcept
+            : lock_impl{+[](void* co) {
+                return ErasedCoRef{std::coroutine_handle<T>::from_address(co)};
+            }} {
+        if (co) {
+            rec = co.promise().get_weak();
+            rec->inc_refs();
+        }
+    }
+
+    ~ErasedCoWeakRef() noexcept {
+        if (rec && rec->dec_refs() == 0 && !rec->get_ptr()) {
+            delete rec;
+        }
+    }
+
+    ErasedCoWeakRef(ErasedCoWeakRef const& rhs) noexcept
+            : rec{rhs.rec}
+            , lock_impl{rhs.lock_impl} {
+        if (rec) {
+            rec->inc_refs();
+        }
+    }
+
+    ErasedCoWeakRef& operator=(ErasedCoWeakRef const& rhs) noexcept {
+        ErasedCoWeakRef tmp{rhs};
+        *this = std::move(tmp);
+        return *this;
+    }
+
+    ErasedCoWeakRef(ErasedCoWeakRef&& rhs) noexcept
+            : rec{rhs.rec}
+            , lock_impl{rhs.lock_impl} {
+        rhs.rec = nullptr;
+    }
+
+    ErasedCoWeakRef& operator=(ErasedCoWeakRef&& rhs) noexcept {
+        this->~ErasedCoWeakRef();
+        new (this) ErasedCoWeakRef(std::move(rhs));
+        return *this;
+    }
+
+    ErasedCoRef lock() const noexcept {
+        if (rec && rec->get_ptr()) {
+            return lock_impl(rec->get_ptr());
+        }
+        return {};
+    }
+
+private:
+    CoWeakRefRecord* rec = nullptr;
+    using Lock = ErasedCoRef (*)(void*);
+    Lock lock_impl;
 };
 
 template <class T = void>
@@ -182,9 +319,15 @@ public:
     Task& operator=(Task&& rhs) = default;
 
     struct promise_type : public CoRefRecord {
+        promise_type()
+                : CoRefRecord(std::coroutine_handle<promise_type>::from_promise(*this)
+                                      .address()) {
+        }
+
         Task get_return_object() {
             return Task(std::coroutine_handle<promise_type>::from_promise(*this));
         }
+
         std::suspend_always initial_suspend() noexcept {
             return {};
         }
@@ -268,6 +411,11 @@ public:
     Task& operator=(Task&& rhs) = default;
 
     struct promise_type : public CoRefRecord {
+        promise_type()
+                : CoRefRecord(std::coroutine_handle<promise_type>::from_promise(*this)
+                                      .address()) {
+        }
+
         Task get_return_object() {
             return Task(std::coroutine_handle<promise_type>::from_promise(*this));
         }
@@ -545,7 +693,11 @@ public:
     void await_suspend(std::coroutine_handle<T> waiting) {
         if (auto const executor = this->executor.lock()) {
             executor->spawn(
-                    [waiting = ErasedCoRef{waiting}]() mutable { waiting->resume(); },
+                    [waiting = ErasedCoWeakRef{waiting}]() mutable {
+                        if (auto r = waiting.lock()) {
+                            r->resume();
+                        }
+                    },
                     dur);
         }
     }

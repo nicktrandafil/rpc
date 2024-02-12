@@ -51,7 +51,7 @@ TEST_CASE("construct and send many values, conditional variable is involved", "[
     int counter = 0;
     auto const start = std::chrono::steady_clock::now();
     executor->block_on([&]() -> Task<void> {
-        executor->spawn([](auto tx) -> Task<void> {
+        auto h = executor->spawn([](auto tx) -> Task<void> {
             for (int i = 0; i < 10; ++i) {
                 co_await Sleep{5ms};
                 tx.send(i);
