@@ -369,8 +369,8 @@ public:
     }
 
     template <class U>
-    auto await_suspend(std::coroutine_handle<U> waiting) noexcept {
-        this->co->promise().continuation = ErasedCoRef{waiting};
+    auto await_suspend(std::coroutine_handle<U> caller) noexcept {
+        this->co->promise().continuation = ErasedCoRef{caller};
         return this->co.get();
     }
 
@@ -431,11 +431,10 @@ public:
                     return false;
                 }
                 std::coroutine_handle<> await_suspend(std::coroutine_handle<>) noexcept {
-                    if (me->continuation) {
-                        return me->continuation.get();
-                    } else {
+                    if (!me->continuation) {
                         return std::noop_coroutine();
                     }
+                    return me->continuation.get();
                 }
                 void await_resume() noexcept {
                 }
@@ -462,8 +461,8 @@ public:
     }
 
     template <class U>
-    auto await_suspend(std::coroutine_handle<U> waiting) noexcept {
-        this->co->promise().continuation = ErasedCoRef{waiting};
+    auto await_suspend(std::coroutine_handle<U> caller) noexcept {
+        this->co->promise().continuation = ErasedCoRef{caller};
         return this->co.get();
     }
 
@@ -563,20 +562,57 @@ private:
 template <class T>
 class JoinHandle {
 public:
-    explicit JoinHandle(Task<T>&& task)
+    explicit JoinHandle(Task<std::pair<T, ErasedCoRef>>&& task)
             : task{std::move(task)} {
     }
 
     void abort() const noexcept {
-        task.coroutine.promise().test_and_set(std::memory_order_release);
+        RPC_TODO();
     }
 
-    Task<T> wait() const noexcept {
-        co_return co_await task;
+    Task<T> wait() && noexcept {
+        co_return co_await std::move(task).first;
     }
 
 private:
-    Task<T> task;
+    Task<std::pair<T, ErasedCoRef>> task;
+};
+
+template <>
+class JoinHandle<void> {
+public:
+    explicit JoinHandle(Task<ErasedCoRef>&& task)
+            : task{std::move(task)} {
+    }
+
+    void abort() const noexcept {
+        RPC_TODO();
+    }
+
+    Task<void> wait() && noexcept {
+        co_await std::move(task);
+    }
+
+private:
+    Task<ErasedCoRef> task;
+};
+
+template <class T>
+struct CurrentCo {
+    bool await_ready() const noexcept {
+        return false;
+    }
+
+    bool await_suspend(std::coroutine_handle<T> caller) noexcept {
+        x = caller;
+        return false;
+    }
+
+    std::coroutine_handle<T> await_resume() noexcept {
+        return x;
+    }
+
+    std::coroutine_handle<T> x;
 };
 
 class ThisThreadExecutor final : public Executor {
@@ -647,8 +683,27 @@ public:
 
     template <class T>
     JoinHandle<T> spawn(Task<T>&& task) {
-        task.resume();
-        return JoinHandle<T>{std::move(task)};
+        auto owner = [](auto&& task) -> Task<std::pair<T, ErasedCoRef>> {
+            auto co = co_await CurrentCo<
+                    typename Task<std::pair<T, ErasedCoRef>>::promise_type>{};
+            auto guard = ErasedCoRef{co};
+            co_return std::pair{co_await std::move(task), std::move(guard)};
+        }(std::move(task));
+        owner.resume();
+        return JoinHandle<T>{std::move(owner)};
+    }
+
+    JoinHandle<void> spawn(Task<void>&& task) {
+        auto owner = [](auto task) -> Task<ErasedCoRef> {
+            auto co = co_await CurrentCo<typename Task<ErasedCoRef>::promise_type>{};
+            auto guard = ErasedCoRef{co};
+            std::cout << "foo1\n";
+            co_await std::move(task);
+            std::cout << "foo2\n";
+            co_return std::move(guard);
+        }(std::move(task));
+        owner.resume();
+        return JoinHandle<void>{std::move(owner)};
     }
 
 private:
@@ -690,11 +745,11 @@ public:
         return false;
     }
     template <class T>
-    void await_suspend(std::coroutine_handle<T> waiting) {
+    void await_suspend(std::coroutine_handle<T> caller) {
         if (auto const executor = this->executor.lock()) {
             executor->spawn(
-                    [waiting = ErasedCoWeakRef{waiting}]() mutable {
-                        if (auto r = waiting.lock()) {
+                    [caller = ErasedCoWeakRef{caller}]() mutable {
+                        if (auto r = caller.lock()) {
                             r->resume();
                         }
                     },
