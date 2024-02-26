@@ -12,7 +12,7 @@ add_library(rpc INTERFACE
     include/rpc/runtime.h
     include/rpc/scope_exit.h
 )
-set_target_properties(rpc PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+set_target_properties(rpc PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
 target_include_directories(rpc INTERFACE include)
 
 option(RPC_ABORT_ON_INVARIANT_VIOLATION "Abort on invariant violation" OFF)
