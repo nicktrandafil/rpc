@@ -46,7 +46,7 @@ using std::chrono_literals::operator""ms;
 // }
 
 TEST_CASE("construct and send many values, conditional variable is involved", "[mpsc]") {
-    constexpr int n = 0;
+    constexpr int n = 1;
     auto [tx, rx] = mpsc::unbound_channel<int>();
     auto const executor = ThisThreadExecutor::construct();
     int counter = 0;

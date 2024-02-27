@@ -58,59 +58,17 @@ private:
     size_t refs = 0;
 };
 
-#ifndef NDEBUG
-struct DebugRecord {
-    unsigned const id;
-
-    static unsigned gen() noexcept {
-        static unsigned x = 0;
-        return x++;
-    }
-
-    void trace(std::string_view text, std::source_location at) const {
-        rpc_print("[Task][{}] {} at {}:{}:{}\n",
-                  id,
-                  text,
-                  at.file_name(),
-                  at.line(),
-                  at.column());
-    }
-
-    DebugRecord()
-            : id{gen()} {
-        rpc_print("[Task][{}] constructed\n", id);
-    }
-
-    ~DebugRecord() {
-        rpc_print("[Task][{}] destroyed\n", id);
-    }
-
-    DebugRecord(DebugRecord const&) = delete;
-    DebugRecord(DebugRecord&&) = delete;
-};
-#endif
-
-class InsideCoRefRecord : public DebugRecord {
+class InsideCoRefRecord {
 public:
     explicit InsideCoRefRecord(void* co) noexcept(false)
             : ptr{new OutsideCoRefRecord{co}} {
     }
 
-    void inc_refs(std::source_location at) noexcept {
-        rpc_print("[Task][{}] referenced at {}:{}:{}\n",
-                  id,
-                  at.file_name(),
-                  at.line(),
-                  at.column());
+    void inc_refs() noexcept {
         ++refs;
     }
 
-    size_t dec_refs(std::source_location at) noexcept {
-        rpc_print("[Task][{}] unreferenced at {}:{}:{}\n",
-                  id,
-                  at.file_name(),
-                  at.line(),
-                  at.column());
+    size_t dec_refs() noexcept {
         return --refs;
     }
 
@@ -130,18 +88,15 @@ private:
 template <class T>
 class CoSharedRef {
 public:
-    explicit CoSharedRef(
-            std::coroutine_handle<T> co,
-            std::source_location s = std::source_location::current()) noexcept
-            : loc{s}
-            , co{co} {
+    explicit CoSharedRef(std::coroutine_handle<T> co) noexcept
+            : co{co} {
         if (co) {
-            co.promise().inc_refs(s);
+            co.promise().inc_refs();
         }
     }
 
     ~CoSharedRef() noexcept {
-        if (co && co.promise().dec_refs(loc) == 0) {
+        if (co && co.promise().dec_refs() == 0) {
             if (co.promise().get_outside_ptr()->get_refs() == 0) {
                 delete co.promise().get_outside_ptr();
             } else {
@@ -152,10 +107,9 @@ public:
     }
 
     CoSharedRef(CoSharedRef const& rhs) noexcept
-            : loc{rhs.loc}
-            , co{rhs.co} {
+            : co{rhs.co} {
         if (co) {
-            co.promise().inc_refs(loc);
+            co.promise().inc_refs();
         }
     }
 
@@ -166,8 +120,7 @@ public:
     }
 
     CoSharedRef(CoSharedRef&& rhs) noexcept
-            : loc{rhs.loc}
-            , co{rhs.co} {
+            : co{rhs.co} {
         rhs.co = nullptr;
     }
 
@@ -199,7 +152,6 @@ public:
     }
 
 private:
-    std::source_location loc;
     std::coroutine_handle<T> co;
 };
 
@@ -208,16 +160,13 @@ public:
     ErasedCoSharedRef() = default;
 
     template <class T>
-    explicit ErasedCoSharedRef(
-            std::coroutine_handle<T> co,
-            std::source_location s = std::source_location::current()) noexcept
-            : loc{s}
-            , co{co}
-            , inc_refs{+[](void* co, std::source_location s) {
-                std::coroutine_handle<T>::from_address(co).promise().inc_refs(s);
+    explicit ErasedCoSharedRef(std::coroutine_handle<T> co) noexcept
+            : co{co}
+            , inc_refs{+[](void* co) {
+                std::coroutine_handle<T>::from_address(co).promise().inc_refs();
             }}
-            , dec_refs{+[](void* co, std::source_location s) {
-                return std::coroutine_handle<T>::from_address(co).promise().dec_refs(s);
+            , dec_refs{+[](void* co) {
+                return std::coroutine_handle<T>::from_address(co).promise().dec_refs();
             }}
             , destroy{+[](void* co) {
                 std::coroutine_handle<T>::from_address(co).destroy();
@@ -238,17 +187,14 @@ public:
                         .promise()
                         .get_outside_ptr()
                         ->reset_ptr();
-            }}
-            , get_id{+[](void* co) {
-                return std::coroutine_handle<T>::from_address(co).promise().id;
             }} {
         if (co) {
-            co.promise().inc_refs(s);
+            co.promise().inc_refs();
         }
     }
 
     ~ErasedCoSharedRef() noexcept {
-        if (co && dec_refs(co.address(), loc) == 0) {
+        if (co && dec_refs(co.address()) == 0) {
             if (get_outside_refs(co.address()) == 0) {
                 destroy_outside_record(co.address());
             } else {
@@ -258,17 +204,15 @@ public:
         }
     }
 
-    ErasedCoSharedRef(ErasedCoSharedRef const& rhs,
-                      std::source_location s = std::source_location::current()) noexcept
-            : loc{s}
-            , co{rhs.co}
+    ErasedCoSharedRef(ErasedCoSharedRef const& rhs) noexcept
+            : co{rhs.co}
             , inc_refs{rhs.inc_refs}
             , dec_refs{rhs.dec_refs}
             , destroy{rhs.destroy}
             , get_outside_refs{rhs.get_outside_refs}
             , destroy_outside_record{rhs.destroy_outside_record} {
         if (co) {
-            inc_refs(co.address(), s);
+            inc_refs(co.address());
         }
     }
 
@@ -278,10 +222,8 @@ public:
         return *this;
     }
 
-    ErasedCoSharedRef(ErasedCoSharedRef&& rhs,
-                      std::source_location s = std::source_location::current()) noexcept
-            : loc{s}
-            , co{rhs.co}
+    ErasedCoSharedRef(ErasedCoSharedRef&& rhs) noexcept
+            : co{rhs.co}
             , inc_refs{rhs.inc_refs}
             , dec_refs{rhs.dec_refs}
             , destroy{rhs.destroy}
@@ -308,22 +250,15 @@ public:
         return !!get();
     }
 
-    unsigned id() const noexcept {
-        RPC_ASSERT(co, Invariant{});
-        return get_id(co.address());
-    }
-
 private:
-    using IncRef = void (*)(void*, std::source_location);
-    using DecRef = size_t (*)(void*, std::source_location);
+    using IncRef = void (*)(void*);
+    using DecRef = size_t (*)(void*);
     using Destroy = void (*)(void*);
 
     using GetOutsideRefs = size_t (*)(void*);
     using DestroyOutsideRecord = void (*)(void*);
     using ResetOutsidePtr = void (*)(void*);
-    using GetId = unsigned (*)(void*);
 
-    std::source_location loc;
     std::coroutine_handle<> co = nullptr;
     IncRef inc_refs;
     DecRef dec_refs;
@@ -331,7 +266,6 @@ private:
     GetOutsideRefs get_outside_refs;
     DestroyOutsideRecord destroy_outside_record;
     ResetOutsidePtr reset_outside_ptr;
-    GetId get_id;
 };
 
 class ErasedCoWeakRef {
@@ -340,8 +274,8 @@ public:
 
     template <class T>
     explicit ErasedCoWeakRef(std::coroutine_handle<T> co) noexcept
-            : lock_impl{+[](void* co, std::source_location s) {
-                return ErasedCoSharedRef{std::coroutine_handle<T>::from_address(co), s};
+            : lock_impl{+[](void* co) {
+                return ErasedCoSharedRef{std::coroutine_handle<T>::from_address(co)};
             }} {
         if (co) {
             rec = co.promise().get_outside_ptr();
@@ -381,16 +315,16 @@ public:
         return *this;
     }
 
-    ErasedCoSharedRef lock(std::source_location s) const noexcept {
+    ErasedCoSharedRef lock() const noexcept {
         if (rec && rec->get_ptr()) {
-            return lock_impl(rec->get_ptr(), s);
+            return lock_impl(rec->get_ptr());
         }
         return {};
     }
 
 private:
     OutsideCoRefRecord* rec = nullptr;
-    using Lock = ErasedCoSharedRef (*)(void*, std::source_location s);
+    using Lock = ErasedCoSharedRef (*)(void*);
     Lock lock_impl;
 };
 
@@ -422,26 +356,18 @@ public:
 
         struct Awaiter {
             ErasedCoSharedRef c;
-            unsigned id = 0;
-
-            ~Awaiter() {
-                rpc_print("[Task][{}] final suspend awaiter destroyed\n", id);
-            }
 
             bool await_ready() const noexcept {
-                // return !c;
                 return false;
             }
 
             // todo: if you ever decide to respect coroutines' associated executor,
             // watch this
             template <class U>
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<U> me) noexcept {
-                id = me.promise().id;
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<U>) noexcept {
                 if (!c) {
                     return std::noop_coroutine();
                 }
-                rpc_print("[Task][{}] resuming {}\n", id, c.id());
                 return c.get();
             }
 
@@ -449,10 +375,8 @@ public:
             }
         };
 
-        auto final_suspend(
-                std::source_location s = std::source_location::current()) noexcept {
-            trace("final suspend", s);
-            return Awaiter{this->continuation.lock(s)};
+        auto final_suspend() noexcept {
+            return Awaiter{this->continuation.lock()};
         }
 
         template <class U>
@@ -469,9 +393,7 @@ public:
         ErasedCoWeakRef continuation;
     };
 
-    bool await_ready(
-            std::source_location s = std::source_location::current()) const noexcept {
-        co->promise().trace("awaited", s);
+    bool await_ready() const noexcept {
         return false;
     }
 
@@ -529,15 +451,14 @@ public:
     Task& operator=(Task&& rhs) = default;
 
     struct promise_type : public InsideCoRefRecord {
-        promise_type(std::source_location s = std::source_location::current())
+        promise_type()
                 : InsideCoRefRecord(
                         std::coroutine_handle<promise_type>::from_promise(*this)
                                 .address()) {
-            trace("created", s);
         }
 
-        Task get_return_object(std::source_location s = std::source_location::current()) {
-            return Task(std::coroutine_handle<promise_type>::from_promise(*this), s);
+        Task get_return_object() {
+            return Task(std::coroutine_handle<promise_type>::from_promise(*this));
         }
 
         std::suspend_always initial_suspend() noexcept {
@@ -546,26 +467,18 @@ public:
 
         struct Awaiter {
             ErasedCoSharedRef c;
-            unsigned id = 0;
-
-            ~Awaiter() {
-                rpc_print("[Task][{}] final suspend awaiter destroyed\n", id);
-            }
 
             bool await_ready() const noexcept {
-                // return !c;
                 return false;
             }
 
             // todo: if you ever decide to respect coroutines' associated executor,
             // watch this
             template <class T>
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<T> me) noexcept {
-                id = me.promise().id;
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<T>) noexcept {
                 if (!c) {
                     return std::noop_coroutine();
                 }
-                rpc_print("[Task][{}] resuming {}\n", id, c.id());
                 return c.get();
             }
 
@@ -573,10 +486,8 @@ public:
             }
         };
 
-        auto final_suspend(
-                std::source_location s = std::source_location::current()) noexcept {
-            trace("final suspend", s);
-            return Awaiter{this->continuation.lock(s)};
+        auto final_suspend() noexcept {
+            return Awaiter{this->continuation.lock()};
         }
 
         void return_void() noexcept {
@@ -593,9 +504,7 @@ public:
         ErasedCoWeakRef continuation;
     };
 
-    bool await_ready(
-            std::source_location s = std::source_location::current()) const noexcept {
-        co->promise().trace("awaited", s);
+    bool await_ready() const noexcept {
         return false;
     }
 
@@ -630,8 +539,8 @@ public:
     CoSharedRef<promise_type> co;
 
 private:
-    Task(std::coroutine_handle<promise_type> co, std::source_location s) noexcept
-            : co{co, s} {
+    Task(std::coroutine_handle<promise_type> co) noexcept
+            : co{co} {
     }
 };
 
@@ -655,9 +564,9 @@ public:
     ConditionalVariable(ConditionalVariable&&) = delete;
     ConditionalVariable& operator=(ConditionalVariable&&) = delete;
 
-    void notify(std::source_location s = std::source_location::current()) noexcept {
+    void notify() noexcept {
         if (auto const executor = this->executor.lock()) {
-            if (auto c = this->continuation.lock(s)) {
+            if (auto c = this->continuation.lock()) {
                 executor->spawn([c]() mutable {
                     if (c) {
                         c->resume();
@@ -827,38 +736,16 @@ public:
         return std::move(task).get_result();
     }
 
-    // template <class T>
-    // JoinHandle<T> spawn(Task<T>&& task) {
-    //     auto owner = [](auto&& task) -> Task<std::pair<T, ErasedCoSharedRef>> {
-    //         auto co = co_await CurrentCo<
-    //                 typename Task<std::pair<T, ErasedCoSharedRef>>::promise_type>{};
-    //         auto guard = ErasedCoSharedRef{co};
-    //         co_return std::pair{co_await std::move(task), std::move(guard)};
-    //     }(std::move(task));
-    //     owner.resume();
-    //     return JoinHandle<T>{std::move(owner)};
-    // }
-
-    JoinHandle<void> spawn(Task<void>&& task) {
-        auto owner = [](auto task) -> Task<void> {
-            RPC_SCOPE_EXIT {
-                rpc_print("[ThisThreadExecutor] spawn discarded\n");
-            };
-
-            // todo: Add debug token here and see if we get destroyed. We should.
-            auto const co = co_await CurrentCo<typename Task<void>::promise_type>{};
+    template <class T>
+    JoinHandle<T> spawn(Task<T>&& task) {
+        auto owner = [](auto task) -> Task<T> {
+            auto co = co_await CurrentCo<typename Task<T>::promise_type>{};
             auto const guard = ErasedCoSharedRef{co};
-
-            rpc_print("[ThisThreadExecutor] foo1\n");
-            co_await task;
-            rpc_print("[ThisThreadExecutor] foo2\n");
-
-            // todo: Aren't we destroying ourselves here before call to final_suspend?
-            // but we have leak rather than segfault.
-            co_return;
+            std::ignore = guard;
+            co_return co_await task;
         }(std::move(task));
-        spawn([co = owner.co] { co->resume(); });
-        return JoinHandle<void>{std::move(owner)};
+        owner.resume();
+        return JoinHandle<T>{std::move(owner)};
     }
 
 private:
@@ -899,13 +786,13 @@ public:
     bool await_ready() const noexcept {
         return false;
     }
+
     template <class T>
-    void await_suspend(std::coroutine_handle<T> caller,
-                       std::source_location s = std::source_location::current()) {
+    void await_suspend(std::coroutine_handle<T> caller) {
         if (auto const executor = this->executor.lock()) {
             executor->spawn(
-                    [caller = ErasedCoWeakRef{caller}, s]() mutable {
-                        if (auto r = caller.lock(s)) {
+                    [caller = ErasedCoWeakRef{caller}]() mutable {
+                        if (auto r = caller.lock()) {
                             r->resume();
                         } else {
                             rpc_print("[Sleep] caller discarded\n");
@@ -914,6 +801,7 @@ public:
                     dur);
         }
     }
+
     void await_resume() noexcept {
     }
 
