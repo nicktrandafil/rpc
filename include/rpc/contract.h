@@ -53,7 +53,7 @@ struct UnlikelyAbort {
     }
 };
 
-#define RPC_ASSERT(expr, module)                                                         \
+#define rpc_assert(expr, module)                                                         \
     if (!(expr)) {                                                                       \
         module.failed(std::source_location::current());                                  \
     }                                                                                    \

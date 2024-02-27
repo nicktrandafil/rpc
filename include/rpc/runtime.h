@@ -412,7 +412,7 @@ public:
     }
 
     T get_result() && {
-        RPC_ASSERT(co->promise().result.index() != 0, Invariant{});
+        rpc_assert(co->promise().result.index() != 0, Invariant{});
 
         RPC_SCOPE_EXIT {
             co.reset();
@@ -426,7 +426,7 @@ public:
     }
 
     void resume() {
-        RPC_ASSERT(co, Invariant{});
+        rpc_assert(co, Invariant{});
         co->resume();
     }
 
@@ -522,17 +522,17 @@ public:
     }
 
     void get_result() && {
-        RPC_ASSERT(co->promise().result.index() != 0, Invariant{});
+        rpc_assert(co->promise().result.index() != 0, Invariant{});
 
         if (co->promise().result.index() == 2) {
             std::rethrow_exception(get<2>(std::move(co->promise().result)));
         }
 
-        RPC_ASSERT(co->promise().result.index() == 1, Invariant{});
+        rpc_assert(co->promise().result.index() == 1, Invariant{});
     }
 
     void resume() {
-        RPC_ASSERT(co, Invariant{});
+        rpc_assert(co, Invariant{});
         co->resume();
     }
 
@@ -544,7 +544,7 @@ private:
     }
 };
 
-struct Executor : public std::enable_shared_from_this<Executor> {
+struct Executor {
     virtual void spawn(std::function<void()>&& task) = 0;
     virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
     virtual void increment_work() = 0;
@@ -552,7 +552,7 @@ struct Executor : public std::enable_shared_from_this<Executor> {
     virtual ~Executor() = default;
 };
 
-inline thread_local std::shared_ptr<Executor> current_executor;
+inline thread_local Executor* current_executor = nullptr;
 
 class ConditionalVariable {
 public:
@@ -565,14 +565,13 @@ public:
     ConditionalVariable& operator=(ConditionalVariable&&) = delete;
 
     void notify() noexcept {
-        if (auto const executor = this->executor.lock()) {
-            if (auto c = this->continuation.lock()) {
-                executor->spawn([c]() mutable {
-                    if (c) {
-                        c->resume();
-                    }
-                });
-            }
+        if (auto c = this->continuation.lock()) {
+            rpc_assert(executor, Invariant{});
+            executor->spawn([c]() mutable {
+                if (c) {
+                    c->resume();
+                }
+            });
         }
     }
 
@@ -591,7 +590,7 @@ private:
 
         template <class U>
         void await_suspend(std::coroutine_handle<U> c) noexcept {
-            RPC_ASSERT(current_executor, Invariant{});
+            rpc_assert(current_executor, Invariant{});
             current_executor->increment_work();
             cv->executor = current_executor;
             cv->continuation = ErasedCoWeakRef{c};
@@ -599,10 +598,10 @@ private:
         }
 
         ~Awaiter() {
-            RPC_ASSERT(current_executor == cv->executor.lock(), Invariant{});
+            rpc_assert(current_executor == cv->executor, Invariant{});
             current_executor->decrement_work();
             cv->continuation = ErasedCoWeakRef{};
-            cv->executor.reset();
+            cv->executor = nullptr;
             lock->lock();
         }
 
@@ -611,7 +610,7 @@ private:
     };
 
     ErasedCoWeakRef continuation;
-    std::weak_ptr<Executor> executor;
+    Executor* executor = nullptr;
 };
 
 template <class T>
@@ -671,19 +670,15 @@ struct CurrentCo {
 };
 
 class ThisThreadExecutor final : public Executor {
+public:
     ThisThreadExecutor() {
         tasks.reserve(r);
     }
 
-public:
-    static std::shared_ptr<ThisThreadExecutor> construct() {
-        return std::shared_ptr<ThisThreadExecutor>(new ThisThreadExecutor{});
-    }
-
     /// \throw std::bad_alloc
     template <class T>
-    T block_on(Task<T>&& task) {
-        current_executor = shared_from_this();
+    T block_on(Task<T> task) {
+        current_executor = this;
         task.resume();
         while (true) {
             using std::chrono_literals::operator""ms;
@@ -789,17 +784,14 @@ public:
 
     template <class T>
     void await_suspend(std::coroutine_handle<T> caller) {
-        if (auto const executor = this->executor.lock()) {
-            executor->spawn(
-                    [caller = ErasedCoWeakRef{caller}]() mutable {
-                        if (auto r = caller.lock()) {
-                            r->resume();
-                        } else {
-                            rpc_print("[Sleep] caller discarded\n");
-                        }
-                    },
-                    dur);
-        }
+        rpc_assert(executor, Invariant{});
+        executor->spawn(
+                [caller = ErasedCoWeakRef{caller}]() mutable {
+                    if (auto r = caller.lock()) {
+                        r->resume();
+                    }
+                },
+                dur);
     }
 
     void await_resume() noexcept {
@@ -807,7 +799,7 @@ public:
 
 private:
     std::chrono::milliseconds dur;
-    std::weak_ptr<Executor> executor;
+    Executor* executor;
 };
 
 } // namespace rpc

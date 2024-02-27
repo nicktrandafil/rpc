@@ -113,7 +113,7 @@ public:
 
         it->second.validate_argument<std::remove_reference_t<T>>();
 
-        RPC_TODO();
+        return RPC_TODO();
     }
 
 private:
