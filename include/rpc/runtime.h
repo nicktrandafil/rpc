@@ -151,11 +151,11 @@ public:
         }
     }
 
-    CoSharedRef(CoSharedRef const& rhs,
-                std::source_location s = std::source_location::current()) noexcept
-            : co{rhs.co} {
+    CoSharedRef(CoSharedRef const& rhs) noexcept
+            : loc{rhs.loc}
+            , co{rhs.co} {
         if (co) {
-            co.promise().inc_refs(s);
+            co.promise().inc_refs(loc);
         }
     }
 
@@ -165,9 +165,8 @@ public:
         return *this;
     }
 
-    CoSharedRef(CoSharedRef&& rhs,
-                std::source_location s = std::source_location::current()) noexcept
-            : loc{s}
+    CoSharedRef(CoSharedRef&& rhs) noexcept
+            : loc{rhs.loc}
             , co{rhs.co} {
         rhs.co = nullptr;
     }
@@ -239,6 +238,9 @@ public:
                         .promise()
                         .get_outside_ptr()
                         ->reset_ptr();
+            }}
+            , get_id{+[](void* co) {
+                return std::coroutine_handle<T>::from_address(co).promise().id;
             }} {
         if (co) {
             co.promise().inc_refs(s);
@@ -306,6 +308,11 @@ public:
         return !!get();
     }
 
+    unsigned id() const noexcept {
+        RPC_ASSERT(co, Invariant{});
+        return get_id(co.address());
+    }
+
 private:
     using IncRef = void (*)(void*, std::source_location);
     using DecRef = size_t (*)(void*, std::source_location);
@@ -314,6 +321,7 @@ private:
     using GetOutsideRefs = size_t (*)(void*);
     using DestroyOutsideRecord = void (*)(void*);
     using ResetOutsidePtr = void (*)(void*);
+    using GetId = unsigned (*)(void*);
 
     std::source_location loc;
     std::coroutine_handle<> co = nullptr;
@@ -323,6 +331,7 @@ private:
     GetOutsideRefs get_outside_refs;
     DestroyOutsideRecord destroy_outside_record;
     ResetOutsidePtr reset_outside_ptr;
+    GetId get_id;
 };
 
 class ErasedCoWeakRef {
@@ -331,8 +340,8 @@ public:
 
     template <class T>
     explicit ErasedCoWeakRef(std::coroutine_handle<T> co) noexcept
-            : lock_impl{+[](void* co) {
-                return ErasedCoSharedRef{std::coroutine_handle<T>::from_address(co)};
+            : lock_impl{+[](void* co, std::source_location s) {
+                return ErasedCoSharedRef{std::coroutine_handle<T>::from_address(co), s};
             }} {
         if (co) {
             rec = co.promise().get_outside_ptr();
@@ -372,16 +381,16 @@ public:
         return *this;
     }
 
-    ErasedCoSharedRef lock() const noexcept {
+    ErasedCoSharedRef lock(std::source_location s) const noexcept {
         if (rec && rec->get_ptr()) {
-            return lock_impl(rec->get_ptr());
+            return lock_impl(rec->get_ptr(), s);
         }
         return {};
     }
 
 private:
     OutsideCoRefRecord* rec = nullptr;
-    using Lock = ErasedCoSharedRef (*)(void*);
+    using Lock = ErasedCoSharedRef (*)(void*, std::source_location s);
     Lock lock_impl;
 };
 
@@ -411,26 +420,39 @@ public:
             return {};
         }
 
-        auto final_suspend() noexcept {
-            struct Awaiter {
-                ErasedCoSharedRef c;
-                bool await_ready() const noexcept {
-                    return false;
-                }
+        struct Awaiter {
+            ErasedCoSharedRef c;
+            unsigned id = 0;
 
-                // todo: if you ever decide to respect coroutines' associated executor,
-                // watch this
-                std::coroutine_handle<> await_suspend(std::coroutine_handle<>) noexcept {
-                    if (!c) {
-                        return std::noop_coroutine();
-                    }
-                    return c.get();
-                }
+            ~Awaiter() {
+                rpc_print("[Task][{}] final suspend awaiter destroyed\n", id);
+            }
 
-                void await_resume() noexcept {
+            bool await_ready() const noexcept {
+                // return !c;
+                return false;
+            }
+
+            // todo: if you ever decide to respect coroutines' associated executor,
+            // watch this
+            template <class U>
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<U> me) noexcept {
+                id = me.promise().id;
+                if (!c) {
+                    return std::noop_coroutine();
                 }
-            };
-            return Awaiter{this->continuation.lock()};
+                rpc_print("[Task][{}] resuming {}\n", id, c.id());
+                return c.get();
+            }
+
+            void await_resume() noexcept {
+            }
+        };
+
+        auto final_suspend(
+                std::source_location s = std::source_location::current()) noexcept {
+            trace("final suspend", s);
+            return Awaiter{this->continuation.lock(s)};
         }
 
         template <class U>
@@ -514,33 +536,47 @@ public:
             trace("created", s);
         }
 
-        Task get_return_object() {
-            return Task(std::coroutine_handle<promise_type>::from_promise(*this));
+        Task get_return_object(std::source_location s = std::source_location::current()) {
+            return Task(std::coroutine_handle<promise_type>::from_promise(*this), s);
         }
 
         std::suspend_always initial_suspend() noexcept {
             return {};
         }
 
-        auto final_suspend() noexcept {
-            struct Awaiter {
-                ErasedCoSharedRef c;
-                bool await_ready() const noexcept {
-                    return false;
+        struct Awaiter {
+            ErasedCoSharedRef c;
+            unsigned id = 0;
+
+            ~Awaiter() {
+                rpc_print("[Task][{}] final suspend awaiter destroyed\n", id);
+            }
+
+            bool await_ready() const noexcept {
+                // return !c;
+                return false;
+            }
+
+            // todo: if you ever decide to respect coroutines' associated executor,
+            // watch this
+            template <class T>
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<T> me) noexcept {
+                id = me.promise().id;
+                if (!c) {
+                    return std::noop_coroutine();
                 }
-                // todo: if you ever decide to respect coroutines' associated executor,
-                // watch this
-                std::coroutine_handle<> await_suspend(std::coroutine_handle<>) noexcept {
-                    if (!c) {
-                        return std::noop_coroutine();
-                    }
-                    return c.get();
-                }
-                void await_resume() noexcept {
-                    RPC_ASSERT(false, Invariant{});
-                }
-            };
-            return Awaiter{this->continuation.lock()};
+                rpc_print("[Task][{}] resuming {}\n", id, c.id());
+                return c.get();
+            }
+
+            void await_resume() noexcept {
+            }
+        };
+
+        auto final_suspend(
+                std::source_location s = std::source_location::current()) noexcept {
+            trace("final suspend", s);
+            return Awaiter{this->continuation.lock(s)};
         }
 
         void return_void() noexcept {
@@ -591,13 +627,12 @@ public:
         co->resume();
     }
 
-private:
-    Task(std::coroutine_handle<promise_type> co) noexcept
-            : co{co} {
-    }
+    CoSharedRef<promise_type> co;
 
 private:
-    CoSharedRef<promise_type> co;
+    Task(std::coroutine_handle<promise_type> co, std::source_location s) noexcept
+            : co{co, s} {
+    }
 };
 
 struct Executor : public std::enable_shared_from_this<Executor> {
@@ -620,9 +655,9 @@ public:
     ConditionalVariable(ConditionalVariable&&) = delete;
     ConditionalVariable& operator=(ConditionalVariable&&) = delete;
 
-    void notify() noexcept {
+    void notify(std::source_location s = std::source_location::current()) noexcept {
         if (auto const executor = this->executor.lock()) {
-            if (auto c = this->continuation.lock()) {
+            if (auto c = this->continuation.lock(s)) {
                 executor->spawn([c]() mutable {
                     if (c) {
                         c->resume();
@@ -822,7 +857,7 @@ public:
             // but we have leak rather than segfault.
             co_return;
         }(std::move(task));
-        owner.resume();
+        spawn([co = owner.co] { co->resume(); });
         return JoinHandle<void>{std::move(owner)};
     }
 
@@ -865,11 +900,12 @@ public:
         return false;
     }
     template <class T>
-    void await_suspend(std::coroutine_handle<T> caller) {
+    void await_suspend(std::coroutine_handle<T> caller,
+                       std::source_location s = std::source_location::current()) {
         if (auto const executor = this->executor.lock()) {
             executor->spawn(
-                    [caller = ErasedCoWeakRef{caller}]() mutable {
-                        if (auto r = caller.lock()) {
+                    [caller = ErasedCoWeakRef{caller}, s]() mutable {
+                        if (auto r = caller.lock(s)) {
                             r->resume();
                         } else {
                             rpc_print("[Sleep] caller discarded\n");
