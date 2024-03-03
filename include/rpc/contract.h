@@ -27,7 +27,7 @@ struct Todo {
     }
 };
 
-#define RPC_TODO()                                                                       \
+#define rpc_todo()                                                                       \
     rpc::Todo {                                                                          \
         std::source_location::current()                                                  \
     }

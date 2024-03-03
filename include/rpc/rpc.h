@@ -39,7 +39,7 @@ public:
 
     /// \throw ProtocolError
     void validate(ReturnValue const&) const noexcept(false) {
-        RPC_TODO();
+        rpc_todo();
     }
 
 private:
@@ -79,11 +79,11 @@ private:
 class ChannelTransport : public Transport {
 public:
     void write(std::vector<std::byte> const&) const noexcept override {
-        RPC_TODO();
+        rpc_todo();
     }
 
     void read(std::vector<std::byte>&) const noexcept override {
-        RPC_TODO();
+        rpc_todo();
     }
 };
 
@@ -113,7 +113,7 @@ public:
 
         it->second.validate_argument<std::remove_reference_t<T>>();
 
-        return RPC_TODO();
+        return rpc_todo();
     }
 
 private:

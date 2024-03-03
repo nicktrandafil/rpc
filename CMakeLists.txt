@@ -20,7 +20,7 @@ if(RPC_ABORT_ON_INVARIANT_VIOLATION)
     target_compile_definitions(rpc INTERFACE RPC_ABORT_ON_INVARIANT_VIOLATION)
 endif()
 
-option(RPC_ABORT_ON_TODO "Abort on RPC_TODO" OFF)
+option(RPC_ABORT_ON_TODO "Abort on rpc_todo" OFF)
 if(RPC_ABORT_ON_TODO)
     target_compile_definitions(rpc INTERFACE RPC_ABORT_ON_TODO)
 endif()

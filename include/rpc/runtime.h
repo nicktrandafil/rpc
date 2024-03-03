@@ -376,6 +376,8 @@ public:
         };
 
         auto final_suspend() noexcept {
+            // todo: Optimize to not keep shared ref if we are not going to continue the
+            // caller right away scheduling it to its not executor
             return Awaiter{this->continuation.lock()};
         }
 
@@ -404,10 +406,6 @@ public:
     }
 
     T await_resume() {
-        RPC_SCOPE_EXIT {
-            co.reset();
-        };
-
         return std::move(*this).get_result();
     }
 
@@ -430,12 +428,10 @@ public:
         co->resume();
     }
 
-private:
     Task(std::coroutine_handle<promise_type> co) noexcept
             : co{co} {
     }
 
-private:
     CoSharedRef<promise_type> co;
 };
 
@@ -487,6 +483,8 @@ public:
         };
 
         auto final_suspend() noexcept {
+            // todo: Optimize to not keep shared ref if we are not going to continue the
+            // caller right away scheduling it to its not executor
             return Awaiter{this->continuation.lock()};
         }
 
@@ -515,14 +513,15 @@ public:
     }
 
     void await_resume() {
-        RPC_SCOPE_EXIT {
-            co.reset();
-        };
         std::move(*this).get_result();
     }
 
     void get_result() && {
         rpc_assert(co->promise().result.index() != 0, Invariant{});
+
+        RPC_SCOPE_EXIT {
+            co.reset();
+        };
 
         if (co->promise().result.index() == 2) {
             std::rethrow_exception(get<2>(std::move(co->promise().result)));
@@ -536,12 +535,11 @@ public:
         co->resume();
     }
 
-    CoSharedRef<promise_type> co;
-
-private:
     Task(std::coroutine_handle<promise_type> co) noexcept
             : co{co} {
     }
+
+    CoSharedRef<promise_type> co;
 };
 
 struct Executor {
@@ -616,57 +614,81 @@ private:
 template <class T>
 class JoinHandle {
 public:
-    explicit JoinHandle(Task<std::pair<T, ErasedCoSharedRef>>&& task)
+    explicit JoinHandle(Task<T>&& task)
             : task{std::move(task)} {
     }
 
+    ~JoinHandle() {
+        if (!task.co || task.co->done()) {
+            return;
+        }
+
+        auto pin = [](auto co) -> CoGuard {
+            std::ignore = co;
+            co_return;
+        }(task.co);
+
+        task.co->promise().continuation = ErasedCoWeakRef{pin.co};
+    }
+
+    JoinHandle(JoinHandle const&) = delete;
+    JoinHandle& operator=(JoinHandle const&) = delete;
+    JoinHandle(JoinHandle&&) = default;
+    JoinHandle& operator=(JoinHandle&&) = default;
+
     void abort() const noexcept {
-        RPC_TODO();
+        rpc_todo();
     }
 
-    Task<T> wait() && noexcept {
-        co_return co_await task.first;
-    }
-
-private:
-    Task<std::pair<T, ErasedCoSharedRef>> task;
-};
-
-template <>
-class JoinHandle<void> {
-public:
-    explicit JoinHandle(Task<void>&& task)
-            : task{std::move(task)} {
-    }
-
-    void abort() const noexcept {
-        RPC_TODO();
-    }
-
-    Task<void> wait() && noexcept {
-        co_await task;
-    }
-
-private:
-    Task<void> task;
-};
-
-template <class T>
-struct CurrentCo {
     bool await_ready() const noexcept {
-        return false;
+        return task.co->done();
     }
 
-    bool await_suspend(std::coroutine_handle<T> caller) noexcept {
-        x = caller;
-        return false;
+    template <class U>
+    auto await_suspend(std::coroutine_handle<U> caller) noexcept {
+        task.co->promise().continuation = ErasedCoWeakRef(caller);
     }
 
-    std::coroutine_handle<T> await_resume() noexcept {
-        return x;
+    auto await_resume() noexcept {
+        return task.await_resume();
     }
 
-    std::coroutine_handle<T> x;
+private:
+    // Live until final_suspend
+    struct CoGuard {
+        struct promise_type : public InsideCoRefRecord {
+            promise_type()
+                    : InsideCoRefRecord(
+                            std::coroutine_handle<promise_type>::from_promise(*this)
+                                    .address()) {
+                inc_refs();
+            }
+
+            CoGuard get_return_object() {
+                return CoGuard{std::coroutine_handle<promise_type>::from_promise(*this)};
+            }
+
+            std::suspend_always initial_suspend() noexcept {
+                return {};
+            }
+
+            std::suspend_always final_suspend() noexcept {
+                dec_refs();
+                return {};
+            }
+
+            void return_void() noexcept {
+            }
+
+            void unhandled_exception() noexcept {
+            }
+        };
+
+        std::coroutine_handle<promise_type> co;
+    };
+
+private:
+    Task<T> task;
 };
 
 class ThisThreadExecutor final : public Executor {
@@ -693,10 +715,10 @@ public:
                 }
 
                 auto const now = steady_clock::now();
-                auto const it =
-                        std::partition(delayed_tasks.begin(),
-                                       delayed_tasks.end(),
-                                       [now](auto const& p) { return now < p.second; });
+                auto const it = std::partition(
+                        delayed_tasks.begin(), delayed_tasks.end(), [now](auto const& p) {
+                            return now < p.second;
+                        });
 
                 std::vector<DelayedWork> delayed_tasks2{
                         std::make_move_iterator(it),
@@ -727,20 +749,13 @@ public:
 
             std::this_thread::sleep_until(soon);
         }
-
         return std::move(task).get_result();
     }
 
     template <class T>
     JoinHandle<T> spawn(Task<T>&& task) {
-        auto owner = [](auto task) -> Task<T> {
-            auto co = co_await CurrentCo<typename Task<T>::promise_type>{};
-            auto const guard = ErasedCoSharedRef{co};
-            std::ignore = guard;
-            co_return co_await task;
-        }(std::move(task));
-        owner.resume();
-        return JoinHandle<T>{std::move(owner)};
+        task.resume();
+        return JoinHandle<T>{std::move(task)};
     }
 
 private:
