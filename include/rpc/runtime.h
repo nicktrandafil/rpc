@@ -623,12 +623,14 @@ public:
             return;
         }
 
-        auto pin = [](auto co) -> CoGuard {
-            std::ignore = co;
-            co_return;
-        }(task.co);
+        auto co = task.co;
 
-        task.co->promise().continuation = ErasedCoWeakRef{pin.co};
+        auto pin = [](auto t) -> CoGuard {
+            auto foo = std::move(t);
+            co_return;
+        }(std::move(task));
+
+        co->promise().continuation = ErasedCoWeakRef{pin.co};
     }
 
     JoinHandle(JoinHandle const&) = delete;
@@ -654,7 +656,6 @@ public:
     }
 
 private:
-    // Live until final_suspend
     struct CoGuard {
         struct promise_type : public InsideCoRefRecord {
             promise_type()
