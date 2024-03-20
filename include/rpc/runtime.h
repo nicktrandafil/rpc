@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stack>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -27,305 +28,46 @@
 
 namespace rpc {
 
-class OutsideCoRefRecord {
+constexpr inline auto operator""_KB(unsigned long long const x) -> unsigned long long {
+    return 1024L * x;
+}
+
+class TaskStack {
 public:
-    explicit OutsideCoRefRecord(void* ptr) noexcept
-            : ptr{ptr} {
+    template <class T>
+    void push(std::coroutine_handle<T> co) noexcept(false) {
+        frames.push(Frame{
+                .co = co,
+        });
     }
-
-    void inc_refs() noexcept {
-        ++refs;
-    }
-
-    size_t dec_refs() noexcept {
-        return --refs;
-    }
-
-    size_t get_refs() const noexcept {
-        return refs;
-    }
-
-    void* get_ptr() const noexcept {
-        return ptr;
-    }
-
-    void reset_ptr() noexcept {
-        ptr = nullptr;
-    }
-
-private:
-    void* ptr = nullptr;
-    size_t refs = 0;
-};
-
-class InsideCoRefRecord {
-public:
-    explicit InsideCoRefRecord(void* co) noexcept(false)
-            : ptr{new OutsideCoRefRecord{co}} {
-    }
-
-    void inc_refs() noexcept {
-        ++refs;
-    }
-
-    size_t dec_refs() noexcept {
-        return --refs;
-    }
-
-    OutsideCoRefRecord* get_outside_ptr() noexcept {
-        return ptr;
-    }
-
-    size_t get_refs() const noexcept {
-        return refs;
-    }
-
-private:
-    OutsideCoRefRecord* ptr;
-    size_t refs = 0;
-};
-
-template <class T>
-class CoSharedRef {
-public:
-    explicit CoSharedRef(std::coroutine_handle<T> co) noexcept
-            : co{co} {
-        if (co) {
-            co.promise().inc_refs();
-        }
-    }
-
-    ~CoSharedRef() noexcept {
-        if (co && co.promise().dec_refs() == 0) {
-            if (co.promise().get_outside_ptr()->get_refs() == 0) {
-                delete co.promise().get_outside_ptr();
-            } else {
-                co.promise().get_outside_ptr()->reset_ptr();
-            }
-            co.destroy();
-        }
-    }
-
-    CoSharedRef(CoSharedRef const& rhs) noexcept
-            : co{rhs.co} {
-        if (co) {
-            co.promise().inc_refs();
-        }
-    }
-
-    CoSharedRef& operator=(CoSharedRef const& rhs) noexcept {
-        CoSharedRef<T> tmp{rhs};
-        *this = std::move(tmp);
-        return *this;
-    }
-
-    CoSharedRef(CoSharedRef&& rhs) noexcept
-            : co{rhs.co} {
-        rhs.co = nullptr;
-    }
-
-    CoSharedRef& operator=(CoSharedRef&& rhs) noexcept {
-        this->~CoSharedRef();
-        new (this) CoSharedRef(std::move(rhs));
-        return *this;
-    }
-
-    auto get() const noexcept {
-        return co;
-    }
-
-    std::coroutine_handle<T>* operator->() noexcept {
-        return &co;
-    }
-
-    std::coroutine_handle<T> const* operator->() const noexcept {
-        return &co;
-    }
-
-    explicit operator bool() const noexcept {
-        return !!co;
-    }
-
-    void reset() noexcept {
-        CoSharedRef tmp{nullptr};
-        std::swap(*this, tmp);
-    }
-
-private:
-    std::coroutine_handle<T> co;
-};
-
-class ErasedCoSharedRef {
-public:
-    ErasedCoSharedRef() = default;
 
     template <class T>
-    explicit ErasedCoSharedRef(std::coroutine_handle<T> co) noexcept
-            : co{co}
-            , inc_refs{+[](void* co) {
-                std::coroutine_handle<T>::from_address(co).promise().inc_refs();
-            }}
-            , dec_refs{+[](void* co) {
-                return std::coroutine_handle<T>::from_address(co).promise().dec_refs();
-            }}
-            , destroy{+[](void* co) {
-                std::coroutine_handle<T>::from_address(co).destroy();
-            }}
-            , get_outside_refs{+[](void* co) {
-                return std::coroutine_handle<T>::from_address(co)
-                        .promise()
-                        .get_outside_ptr()
-                        ->get_refs();
-            }}
-            , destroy_outside_record{+[](void* co) {
-                delete std::coroutine_handle<T>::from_address(co)
-                        .promise()
-                        .get_outside_ptr();
-            }}
-            , reset_outside_ptr{+[](void* co) {
-                std::coroutine_handle<T>::from_address(co)
-                        .promise()
-                        .get_outside_ptr()
-                        ->reset_ptr();
-            }} {
-        if (co) {
-            co.promise().inc_refs();
+    T take_result() const noexcept(false) {
+        rpc_assert(state != Result::none, Invariant{});
+        switch (state) {
+        case Result::none:
+            return rpc_unreachable(Invariant{});
+        case Result::exception:
+            std::rethrow_exception(exception);
+        case Result::value:
+            
         }
-    }
-
-    ~ErasedCoSharedRef() noexcept {
-        if (co && dec_refs(co.address()) == 0) {
-            if (get_outside_refs(co.address()) == 0) {
-                destroy_outside_record(co.address());
-            } else {
-                reset_outside_ptr(co.address());
-            }
-            destroy(co.address());
-        }
-    }
-
-    ErasedCoSharedRef(ErasedCoSharedRef const& rhs) noexcept
-            : co{rhs.co}
-            , inc_refs{rhs.inc_refs}
-            , dec_refs{rhs.dec_refs}
-            , destroy{rhs.destroy}
-            , get_outside_refs{rhs.get_outside_refs}
-            , destroy_outside_record{rhs.destroy_outside_record} {
-        if (co) {
-            inc_refs(co.address());
-        }
-    }
-
-    ErasedCoSharedRef& operator=(ErasedCoSharedRef const& rhs) {
-        ErasedCoSharedRef tmp{rhs};
-        *this = std::move(tmp);
-        return *this;
-    }
-
-    ErasedCoSharedRef(ErasedCoSharedRef&& rhs) noexcept
-            : co{rhs.co}
-            , inc_refs{rhs.inc_refs}
-            , dec_refs{rhs.dec_refs}
-            , destroy{rhs.destroy}
-            , get_outside_refs{rhs.get_outside_refs}
-            , destroy_outside_record{rhs.destroy_outside_record} {
-        rhs.co = nullptr;
-    }
-
-    ErasedCoSharedRef& operator=(ErasedCoSharedRef&& rhs) {
-        this->~ErasedCoSharedRef();
-        new (this) ErasedCoSharedRef(std::move(rhs));
-        return *this;
-    }
-
-    std::coroutine_handle<> get() const noexcept {
-        return co;
-    }
-
-    std::coroutine_handle<>* operator->() noexcept {
-        return &co;
-    }
-
-    explicit operator bool() const noexcept {
-        return !!get();
     }
 
 private:
-    using IncRef = void (*)(void*);
-    using DecRef = size_t (*)(void*);
-    using Destroy = void (*)(void*);
+    struct Frame {
+        std::coroutine_handle<> co;
+    };
 
-    using GetOutsideRefs = size_t (*)(void*);
-    using DestroyOutsideRecord = void (*)(void*);
-    using ResetOutsidePtr = void (*)(void*);
+    enum class Result {
+        none,
+        exception,
+        value,
+    } state;
+    std::exception_ptr exception;
+    std::aligned_storage<10_KB, alignof(std::max_align_t)> result;
 
-    std::coroutine_handle<> co = nullptr;
-    IncRef inc_refs;
-    DecRef dec_refs;
-    Destroy destroy;
-    GetOutsideRefs get_outside_refs;
-    DestroyOutsideRecord destroy_outside_record;
-    ResetOutsidePtr reset_outside_ptr;
-};
-
-class ErasedCoWeakRef {
-public:
-    ErasedCoWeakRef() = default;
-
-    template <class T>
-    explicit ErasedCoWeakRef(std::coroutine_handle<T> co) noexcept
-            : lock_impl{+[](void* co) {
-                return ErasedCoSharedRef{std::coroutine_handle<T>::from_address(co)};
-            }} {
-        if (co) {
-            rec = co.promise().get_outside_ptr();
-            rec->inc_refs();
-        }
-    }
-
-    ~ErasedCoWeakRef() noexcept {
-        if (rec && rec->dec_refs() == 0 && !rec->get_ptr()) {
-            delete rec;
-        }
-    }
-
-    ErasedCoWeakRef(ErasedCoWeakRef const& rhs) noexcept
-            : rec{rhs.rec}
-            , lock_impl{rhs.lock_impl} {
-        if (rec) {
-            rec->inc_refs();
-        }
-    }
-
-    ErasedCoWeakRef& operator=(ErasedCoWeakRef const& rhs) noexcept {
-        ErasedCoWeakRef tmp{rhs};
-        *this = std::move(tmp);
-        return *this;
-    }
-
-    ErasedCoWeakRef(ErasedCoWeakRef&& rhs) noexcept
-            : rec{rhs.rec}
-            , lock_impl{rhs.lock_impl} {
-        rhs.rec = nullptr;
-    }
-
-    ErasedCoWeakRef& operator=(ErasedCoWeakRef&& rhs) noexcept {
-        this->~ErasedCoWeakRef();
-        new (this) ErasedCoWeakRef(std::move(rhs));
-        return *this;
-    }
-
-    ErasedCoSharedRef lock() const noexcept {
-        if (rec && rec->get_ptr()) {
-            return lock_impl(rec->get_ptr());
-        }
-        return {};
-    }
-
-private:
-    OutsideCoRefRecord* rec = nullptr;
-    using Lock = ErasedCoSharedRef (*)(void*);
-    Lock lock_impl;
+    std::stack<Frame, std::vector<Frame>> frames; // todo: allocator optimizaiton
 };
 
 template <class T = void>
@@ -339,12 +81,8 @@ public:
     Task(Task&& rhs) = default;
     Task& operator=(Task&& rhs) = default;
 
-    struct promise_type : public InsideCoRefRecord {
-        promise_type()
-                : InsideCoRefRecord(
-                        std::coroutine_handle<promise_type>::from_promise(*this)
-                                .address()) {
-        }
+    struct promise_type {
+        promise_type() {}
 
         Task get_return_object() {
             return Task(std::coroutine_handle<promise_type>::from_promise(*this));
@@ -355,8 +93,8 @@ public:
         }
 
         struct Awaiter {
-            ErasedCoSharedRef c;
-
+            // todo: if we have continuation and it is in the same executor, we can avoid
+            // scheduling it
             bool await_ready() const noexcept {
                 return false;
             }
@@ -392,7 +130,8 @@ public:
         }
 
         std::variant<std::monostate, T, std::exception_ptr> result;
-        ErasedCoWeakRef continuation;
+
+        std::weak_ptr<TaskStack> stack; // todo: implement own weak ptr
     };
 
     bool await_ready() const noexcept {
@@ -401,7 +140,9 @@ public:
 
     template <class U>
     auto await_suspend(std::coroutine_handle<U> caller) noexcept {
-        this->co->promise().continuation = ErasedCoWeakRef{caller};
+        auto const stack = caller.stack.lock();
+        assert(stack);
+        this->co->promise().stack = stack;
         return this->co.get();
     }
 
@@ -432,7 +173,7 @@ public:
             : co{co} {
     }
 
-    CoSharedRef<promise_type> co;
+    std::shared_ptr<TaskStack> stack;
 };
 
 template <>
@@ -500,6 +241,8 @@ public:
 
         std::variant<std::monostate, Void, std::exception_ptr> result;
         ErasedCoWeakRef continuation;
+
+        std::weak_ptr<TaskStack> stack;
     };
 
     bool await_ready() const noexcept {

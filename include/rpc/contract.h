@@ -47,16 +47,20 @@ struct Invariant {
     }
 };
 
-struct UnlikelyAbort {
-    [[noreturn]] void failed(std::source_location const&) {
-        std::abort();
-    }
-};
-
 #define rpc_assert(expr, module)                                                         \
     if (!(expr)) {                                                                       \
         module.failed(std::source_location::current());                                  \
     }                                                                                    \
     static_assert(true)
+
+struct AnyExpr {
+    template <class T>
+    [[maybe_unused]] [[noreturn]] operator T&() const noexcept {
+        std::abort();
+    }
+};
+
+#define rpc_unreachable(module)                                                          \
+    (module.failed(std::source_location::current()), AnyExpr{})
 
 } // namespace rpc
