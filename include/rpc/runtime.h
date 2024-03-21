@@ -32,42 +32,82 @@ constexpr inline auto operator""_KB(unsigned long long const x) -> unsigned long
     return 1024L * x;
 }
 
+struct Executor {
+    virtual void spawn(std::function<void()>&& task) = 0; // todo: better function
+    virtual void spawn(std::function<void()>&& task,
+                       std::chrono::milliseconds after) = 0; // todo: better function
+    virtual void increment_work() = 0;
+    virtual void decrement_work() = 0;
+    virtual ~Executor() = default;
+};
+
 class TaskStack {
 public:
     template <class T>
-    void push(std::coroutine_handle<T> co) noexcept(false) {
-        frames.push(Frame{
-                .co = co,
+    struct Frame {
+        std::coroutine_handle<T> co;
+        Executor* ex;
+    };
+
+    struct ErasedFrame {
+        std::coroutine_handle<> co;
+        Executor* ex;
+    };
+
+    template <class T>
+    void push(Frame<T> frame) noexcept(false) {
+        frames.push(ErasedFrame{
+                .co = frame.co,
+                .ex = frame.ex,
         });
     }
 
     template <class T>
-    T take_result() const noexcept(false) {
-        rpc_assert(state != Result::none, Invariant{});
-        switch (state) {
+    Frame<T> pop() noexcept {
+        Frame<T> ret{
+                .co = std::coroutine_handle<T>::from_address(frames.top().co.address()),
+                .ex = frames.top().ex};
+        frames.pop();
+        return ret;
+    }
+
+    template </*todo: PromiceConcept*/ class T>
+    Frame<T> top() const noexcept {
+        return Frame{
+                .co = std::coroutine_handle<T>::from_address(frames.top().co.address()),
+                .ex = frames.top().ex};
+    }
+
+    ErasedFrame erased_top() const noexcept {
+        return ErasedFrame{.co = frames.top().co, .ex = frames.top().ex};
+    }
+
+    template <class T>
+    T take_result() noexcept(false) {
+        static_assert(std::is_nothrow_move_constructible_v<T>);
+        rpc_assert(result_index != Result::none, Invariant{});
+        switch (result_index) {
         case Result::none:
             return rpc_unreachable(Invariant{});
         case Result::exception:
-            std::rethrow_exception(exception);
+            std::rethrow_exception(result_exception);
         case Result::value:
-            
+            result_index = Result::none;
+            return std::move(*std::launder(reinterpret_cast<T*>(&result_value)));
         }
     }
 
 private:
-    struct Frame {
-        std::coroutine_handle<> co;
-    };
-
     enum class Result {
         none,
         exception,
         value,
-    } state;
-    std::exception_ptr exception;
-    std::aligned_storage<10_KB, alignof(std::max_align_t)> result;
+    } result_index;
+    std::exception_ptr result_exception;
+    std::aligned_storage<10_KB, alignof(std::max_align_t)> result_value;
 
-    std::stack<Frame, std::vector<Frame>> frames; // todo: allocator optimizaiton
+    std::stack<ErasedFrame, std::vector<ErasedFrame>>
+            frames; // todo: allocator optimizaiton
 };
 
 template <class T = void>
@@ -88,41 +128,62 @@ public:
             return Task(std::coroutine_handle<promise_type>::from_promise(*this));
         }
 
+        // todo: All the operations performed in `await_suspend` can be performed here,
+        // but then the caller coroutine would resume before the current coroutine is
+        // destroyed. We cannot destroy the current coroutine here because it has not yet
+        // been suspended. If we move the contents of `await_suspend` here, we would
+        // sacrifice the guaranteed destruction order.
         std::suspend_always initial_suspend() noexcept {
             return {};
         }
 
-        struct Awaiter {
-            // todo: if we have continuation and it is in the same executor, we can avoid
-            // scheduling it
-            bool await_ready() const noexcept {
-                return false;
-            }
-
-            // todo: if you ever decide to respect coroutines' associated executor,
-            // watch this
-            template <class U>
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<U>) noexcept {
-                if (!c) {
-                    return std::noop_coroutine();
-                }
-                return c.get();
-            }
-
-            void await_resume() noexcept {
-            }
-        };
-
         auto final_suspend() noexcept {
-            // todo: Optimize to not keep shared ref if we are not going to continue the
-            // caller right away scheduling it to its not executor
-            return Awaiter{this->continuation.lock()};
+            struct FinalAwaiter {
+                bool await_ready() const noexcept {
+                    return true;
+                }
+
+                std::coroutine_handle<> await_suspend(
+                        std::coroutine_handle<promise_type> co) noexcept {
+                    auto stack = co.promise().stack.lock();
+                    rpc_assert(stack, Invariant{});
+                    TaskStack::Frame<promise_type> const frame =
+                            stack->template pop<promise_type>();
+
+                    RPC_SCOPE_EXIT {
+                        frame.co.destroy();
+                    };
+
+                    return frame.ex == stack->erased_top().ex
+                                 // immediately resume
+                                 ? stack->template top<promise_type>().co
+
+                                 // schedule
+                                 : [stack = std::move(stack)] {
+                                       // todo: prove I can avoid this temporary,
+                                       // https://godbolt.org/z/PW5bsqeTv,
+                                       // https://stackoverflow.com/q/4176328/2795046,
+                                       // https://en.cppreference.com/w/cpp/language/eval_order
+                                       auto const x = stack.get();
+                                       x->erased_top().ex->spawn(
+                                               [stack = std::move(stack)] {
+                                                   stack->erased_top().co.resume();
+                                               });
+                                       return std::noop_coroutine();
+                                   }();
+                }
+
+                void await_resume() noexcept {
+                }
+            };
+
+            return FinalAwaiter{};
         }
 
         template <class U>
-        void return_value(U&& val) noexcept {
-            static_assert(noexcept(noexcept(T(std::forward<U>(val)))));
-            result.template emplace<1>(std::forward<U>(val));
+        void return_value(U&& val) noexcept(noexcept(T(std::forward<U>(val)))) {
+            auto const lock = stack.lock();
+            rpc_assert(lock, Invariant{});
         }
 
         void unhandled_exception() {
@@ -150,23 +211,11 @@ public:
         return std::move(*this).get_result();
     }
 
-    T get_result() && {
-        rpc_assert(co->promise().result.index() != 0, Invariant{});
-
+    T get_result() && noexcept(false) {
         RPC_SCOPE_EXIT {
-            co.reset();
+            stack.reset();
         };
-
-        if (co->promise().result.index() == 2) {
-            std::rethrow_exception(get<2>(std::move(co->promise().result)));
-        }
-
-        return get<1>(std::move(co->promise().result));
-    }
-
-    void resume() {
-        rpc_assert(co, Invariant{});
-        co->resume();
+        return stack->take_result<T>();
     }
 
     Task(std::coroutine_handle<promise_type> co) noexcept
@@ -174,123 +223,6 @@ public:
     }
 
     std::shared_ptr<TaskStack> stack;
-};
-
-template <>
-class Task<void> {
-public:
-    Task() = delete;
-
-    Task(Task const&) = default;
-    Task& operator=(Task const&) = default;
-
-    Task(Task&& rhs) = default;
-    Task& operator=(Task&& rhs) = default;
-
-    struct promise_type : public InsideCoRefRecord {
-        promise_type()
-                : InsideCoRefRecord(
-                        std::coroutine_handle<promise_type>::from_promise(*this)
-                                .address()) {
-        }
-
-        Task get_return_object() {
-            return Task(std::coroutine_handle<promise_type>::from_promise(*this));
-        }
-
-        std::suspend_always initial_suspend() noexcept {
-            return {};
-        }
-
-        struct Awaiter {
-            ErasedCoSharedRef c;
-
-            bool await_ready() const noexcept {
-                return false;
-            }
-
-            // todo: if you ever decide to respect coroutines' associated executor,
-            // watch this
-            template <class T>
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<T>) noexcept {
-                if (!c) {
-                    return std::noop_coroutine();
-                }
-                return c.get();
-            }
-
-            void await_resume() noexcept {
-            }
-        };
-
-        auto final_suspend() noexcept {
-            // todo: Optimize to not keep shared ref if we are not going to continue the
-            // caller right away scheduling it to its not executor
-            return Awaiter{this->continuation.lock()};
-        }
-
-        void return_void() noexcept {
-            result.emplace<1>(Void{});
-        }
-
-        void unhandled_exception() {
-            result.emplace<2>(std::current_exception());
-        }
-
-        struct Void {};
-
-        std::variant<std::monostate, Void, std::exception_ptr> result;
-        ErasedCoWeakRef continuation;
-
-        std::weak_ptr<TaskStack> stack;
-    };
-
-    bool await_ready() const noexcept {
-        return false;
-    }
-
-    template <class U>
-    auto await_suspend(std::coroutine_handle<U> caller) noexcept {
-        this->co->promise().continuation = ErasedCoWeakRef{caller};
-        return this->co.get();
-    }
-
-    void await_resume() {
-        std::move(*this).get_result();
-    }
-
-    void get_result() && {
-        rpc_assert(co->promise().result.index() != 0, Invariant{});
-
-        RPC_SCOPE_EXIT {
-            co.reset();
-        };
-
-        if (co->promise().result.index() == 2) {
-            std::rethrow_exception(get<2>(std::move(co->promise().result)));
-        }
-
-        rpc_assert(co->promise().result.index() == 1, Invariant{});
-    }
-
-    void resume() {
-        rpc_assert(co, Invariant{});
-        co->resume();
-    }
-
-    Task(std::coroutine_handle<promise_type> co) noexcept
-            : co{co} {
-    }
-
-    CoSharedRef<promise_type> co;
-};
-
-struct Executor {
-    virtual void spawn(std::function<void()>&& task) = 0;
-    virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
-    virtual void increment_work() = 0;
-    virtual void decrement_work() = 0;
-    virtual ~Executor() = default;
 };
 
 inline thread_local Executor* current_executor = nullptr;
