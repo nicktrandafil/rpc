@@ -160,12 +160,7 @@ public:
 
                                  // schedule
                                  : [stack = std::move(stack)] {
-                                       // todo: prove I can avoid this temporary,
-                                       // https://godbolt.org/z/PW5bsqeTv,
-                                       // https://stackoverflow.com/q/4176328/2795046,
-                                       // https://en.cppreference.com/w/cpp/language/eval_order
-                                       auto const x = stack.get();
-                                       x->erased_top().ex->spawn(
+                                       stack->erased_top().ex->spawn(
                                                [stack = std::move(stack)] {
                                                    stack->erased_top().co.resume();
                                                });
