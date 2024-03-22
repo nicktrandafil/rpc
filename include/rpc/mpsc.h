@@ -11,7 +11,7 @@
 namespace rpc::mpsc {
 namespace detail {
 
-template <class T>
+/*template <class T>
 class UnboundState {
 public:
     /// \throw std::bad_alloc
@@ -45,11 +45,12 @@ private:
     std::mutex mutex;
     bool has_producer{true};
     ConditionalVariable cv;
-};
+}*/
+;
 
 } // namespace detail
 
-template <class T>
+/*template <class T>
 class UnboundSender;
 
 template <class T>
@@ -75,49 +76,51 @@ private:
     }
 
     std::shared_ptr<detail::UnboundState<T>> state;
-};
+}*/
+;
 
-struct ClosedError : std::exception {
-    const char* what() const noexcept override {
-        return "closed";
-    }
-};
+        // struct ClosedError : std::exception {
+        //     const char* what() const noexcept override {
+        //         return "closed";
+        //     }
+        // };
 
-template <class T>
-class UnboundSender {
-public:
-    UnboundSender(UnboundSender const&) = default;
-    UnboundSender& operator=(UnboundSender const&) = default;
+        /*template <class T>
+        class UnboundSender {
+        public:
+            UnboundSender(UnboundSender const&) = default;
+            UnboundSender& operator=(UnboundSender const&) = default;
 
-    UnboundSender(UnboundSender&&) = default;
-    UnboundSender& operator=(UnboundSender&&) = default;
+            UnboundSender(UnboundSender&&) = default;
+            UnboundSender& operator=(UnboundSender&&) = default;
 
-    /// \throw std::bad_alloc, ClosedError
-    void send(T value) const noexcept(false) {
-        if (auto const state = this->state.lock()) {
-            state->push(std::move(value));
-        } else {
-            throw ClosedError{};
-        }
-    }
+            /// \throw std::bad_alloc, ClosedError
+            void send(T value) const noexcept(false) {
+                if (auto const state = this->state.lock()) {
+                    state->push(std::move(value));
+                } else {
+                    throw ClosedError{};
+                }
+            }
 
-private:
-    template <class U>
-    friend std::pair<UnboundSender<U>, UnboundReceiver<U>> unbound_channel() noexcept(
-            false);
+        private:
+            template <class U>
+            friend std::pair<UnboundSender<U>, UnboundReceiver<U>> unbound_channel()
+        noexcept( false);
 
-    UnboundSender(std::shared_ptr<detail::UnboundState<T>> state) noexcept
-            : state{std::move(state)} {
-    }
+            UnboundSender(std::shared_ptr<detail::UnboundState<T>> state) noexcept
+                    : state{std::move(state)} {
+            }
 
-    std::weak_ptr<detail::UnboundState<T>> state;
-};
+            std::weak_ptr<detail::UnboundState<T>> state;
+        }*/
+        ;
 
-/// \throw std::bad_alloc
-template <class T>
-std::pair<UnboundSender<T>, UnboundReceiver<T>> unbound_channel() noexcept(false) {
-    auto state = std::make_shared<detail::UnboundState<T>>();
-    return {UnboundSender<T>{state}, UnboundReceiver<T>{std::move(state)}};
-}
+// /// \throw std::bad_alloc
+// template <class T>
+// std::pair<UnboundSender<T>, UnboundReceiver<T>> unbound_channel() noexcept(false) {
+//     auto state = std::make_shared<detail::UnboundState<T>>();
+//     return {UnboundSender<T>{state}, UnboundReceiver<T>{std::move(state)}};
+// }
 
 } // namespace rpc::mpsc

@@ -4,8 +4,8 @@
 
 using namespace rpc;
 
-TEST_CASE("") {
-    // Rpc rpc{std::make_unique<ChannelTransport>()};
-    // rpc.declare_method<void(int)>("hello");
-    // rpc.call_method("hello", 5);
-}
+// TEST_CASE("") {
+//     Rpc rpc{std::make_unique<ChannelTransport>()};
+//     rpc.declare_method<void(int)>("hello");
+//     rpc.call_method("hello", 5);
+// }
