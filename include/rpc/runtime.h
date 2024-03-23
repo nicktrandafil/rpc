@@ -78,13 +78,17 @@ public:
     template <class T>
     T take_result() noexcept(false) {
         rpc_assert(result_index != Result::none, Invariant{});
+
+        RPC_SCOPE_EXIT {
+            result_index = Result::none;
+        };
+
         switch (result_index) {
         case Result::none:
             return static_cast<T>(rpc_unreachable(Invariant{}));
         case Result::exception:
             std::rethrow_exception(result_exception);
         case Result::value:
-            result_index = Result::none;
             if constexpr (std::is_void_v<T>) {
                 return;
             } else {
@@ -98,6 +102,7 @@ public:
                 return std::move(*std::launder(reinterpret_cast<T*>(&result_value)));
             }
         }
+
         return static_cast<T>(rpc_unreachable(Invariant{}));
     }
 
@@ -213,6 +218,13 @@ public:
             , std::conditional_t<std::is_void_v<T>,
                                  ReturnVoid<promise_type>,
                                  ReturnValue<promise_type>> {
+        promise_type() = default;
+
+        promise_type(promise_type const&) = delete;
+        promise_type& operator=(promise_type const&) = delete;
+        promise_type(promise_type&&) = delete;
+        promise_type& operator=(promise_type&&) = delete;
+
         Task get_return_object() {
             return Task(std::coroutine_handle<promise_type>::from_promise(*this));
         }
@@ -421,16 +433,11 @@ public:
         struct Stack {
             std::shared_ptr<TaskStack> stack;
 
-            struct promise_type {
-                std::weak_ptr<TaskStack> stack;
-
-                promise_type() = default;
-
-                promise_type(promise_type const&) = delete;
-                promise_type& operator=(promise_type const&) = delete;
-                promise_type(promise_type&&) = delete;
-                promise_type& operator=(promise_type&&) = delete;
-
+            struct promise_type
+                    : BasePromise
+                    , std::conditional_t<std::is_void_v<T>,
+                                         ReturnVoid<promise_type>,
+                                         ReturnValue<promise_type>> {
                 Stack get_return_object() noexcept(false) {
                     Stack ret{std::make_shared<TaskStack>()};
                     stack = ret.stack;
@@ -448,24 +455,11 @@ public:
                 std::suspend_never final_suspend() const noexcept {
                     return {};
                 }
-
-                void unhandled_exception() const noexcept {
-                }
-
-                void return_void() const noexcept {
-                }
             };
         };
 
-        std::optional<T> ret;
-        std::optional<std::exception_ptr> exception;
-
         auto t = [&](auto task) -> Stack {
-            try {
-                ret = co_await task;
-            } catch (...) {
-                exception = std::current_exception();
-            }
+            co_return co_await task;
         }(std::move(task));
 
         while (true) {
@@ -516,11 +510,7 @@ public:
             std::this_thread::sleep_until(soon);
         }
 
-        if (exception) {
-            std::rethrow_exception(std::move(*exception));
-        }
-
-        return std::move(*ret);
+        return t.stack->template take_result<T>();
     }
 
     // template <class T>

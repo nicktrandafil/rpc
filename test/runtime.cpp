@@ -25,12 +25,17 @@ TEST_CASE("exception", "[ThisThreadExecutor::block_on(task)]") {
                       int);
 }
 
-// TEST_CASE("void", "[ThisThreadExecutor::block_on(task)]") {
-//     ThisThreadExecutor executor;
-//     executor.block_on([&]() -> Task<void> {
-//         co_return;
-//     }());
-// }
+TEST_CASE("void", "[ThisThreadExecutor::block_on(task)]") {
+    ThisThreadExecutor executor;
+    bool executed = false;
+    executor.block_on([&]() -> Task<void> {
+        RPC_SCOPE_EXIT {
+            executed = true;
+        };
+        co_return;
+    }());
+    REQUIRE(executed);
+}
 
 // TEST_CASE("Await for result", "[ThisThreadExecutor::spawn(task)]") {
 //     ThisThreadExecutor executor;
