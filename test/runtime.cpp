@@ -37,6 +37,30 @@ TEST_CASE("void", "[ThisThreadExecutor::block_on(task)]") {
     REQUIRE(executed);
 }
 
+TEST_CASE("Common destruction order", "[ThisThreadExecutor::block_on(task)]") {
+    ThisThreadExecutor executor;
+
+    int acc = 0;
+
+    struct Add {
+        [[maybe_unused]] ~Add() noexcept {
+            acc *= 2;
+            acc += x;
+        }
+
+        int& acc;
+        int x;
+    };
+
+    executor.block_on([&](std::shared_ptr<Add>) -> Task<void> {
+        co_await [&](std::shared_ptr<Add>) -> Task<void> {
+            co_return;
+        }(std::shared_ptr<Add>(new Add{acc, 2}));
+    }(std::shared_ptr<Add>(new Add{acc, 1})));
+
+    REQUIRE(acc == 5);
+}
+
 // TEST_CASE("Await for result", "[ThisThreadExecutor::spawn(task)]") {
 //     ThisThreadExecutor executor;
 //     executor.block_on([&]() -> Task<void> {
