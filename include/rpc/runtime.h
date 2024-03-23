@@ -62,11 +62,8 @@ public:
         });
     }
 
-    template </*todo: PromiseConcept*/ class T>
-    Frame<T> pop() noexcept {
-        Frame<T> ret{
-                .co = std::coroutine_handle<T>::from_address(frames.top().co.address()),
-                .ex = frames.top().ex};
+    ErasedFrame pop_erased() noexcept {
+        ErasedFrame ret{.co = frames.top().co, .ex = frames.top().ex};
         frames.pop();
         return ret;
     }
@@ -151,7 +148,7 @@ struct FinalAwaiter {
     std::coroutine_handle<> await_suspend(std::coroutine_handle<T> co) noexcept {
         auto stack = co.promise().stack.lock();
         rpc_assert(stack, Invariant{});
-        TaskStack::Frame<T> const frame = stack->template pop<T>();
+        auto const frame = stack->pop_erased();
 
         RPC_SCOPE_EXIT {
             frame.co.destroy();
@@ -159,7 +156,7 @@ struct FinalAwaiter {
 
         return frame.ex == stack->erased_top().ex
                      // immediately resume
-                     ? stack->template top<T>().co
+                     ? stack->erased_top().co
 
                      // schedule
                      : [stack = std::move(stack)]() -> std::coroutine_handle<> {
@@ -246,7 +243,8 @@ public:
     template <class U>
     std::coroutine_handle<promise_type> await_suspend(
             std::coroutine_handle<U> caller) noexcept(false) {
-        auto const stack = caller.promise().stack.lock();
+        this->stack = caller.promise().stack;
+        auto const stack = this->stack.lock();
         rpc_assert(stack, Invariant{});
         rpc_assert(co, Invariant{});
         stack->push(TaskStack::Frame<promise_type>{.co = co, .ex = current_executor});
@@ -259,15 +257,8 @@ public:
     }
 
     T get_result() && noexcept(false) {
-        rpc_assert(co, Invariant{});
-
-        RPC_SCOPE_EXIT {
-            co = {};
-        };
-
-        auto stack = co.promise().stack.lock();
+        auto stack = this->stack.lock();
         rpc_assert(stack, Invariant{});
-
         return stack->template take_result<T>();
     }
 
@@ -276,6 +267,7 @@ public:
     }
 
     std::coroutine_handle<promise_type> co;
+    std::weak_ptr<TaskStack> stack;
 };
 
 /*class ConditionalVariable {
@@ -436,6 +428,13 @@ public:
             struct promise_type {
                 std::weak_ptr<TaskStack> stack;
 
+                promise_type() = default;
+
+                promise_type(promise_type const&) = delete;
+                promise_type& operator=(promise_type const&) = delete;
+                promise_type(promise_type&&) = delete;
+                promise_type& operator=(promise_type&&) = delete;
+
                 Stack get_return_object() noexcept(false) {
                     Stack ret{std::make_shared<TaskStack>()};
                     stack = ret.stack;
@@ -462,8 +461,9 @@ public:
             };
         };
 
-        auto co = [](auto task) -> Stack {
-            co_await task;
+        std::optional<T> ret;
+        auto t = [&](auto task) -> Stack {
+            ret = co_await task;
         }(std::move(task));
 
         while (true) {
@@ -514,7 +514,7 @@ public:
             std::this_thread::sleep_until(soon);
         }
 
-        return co.stack->template take_result<T>();
+        return std::move(*ret);
     }
 
     // template <class T>
