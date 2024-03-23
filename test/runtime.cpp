@@ -13,17 +13,17 @@ TEST_CASE("value", "[ThisThreadExecutor::block_on(task)]") {
     REQUIRE(x == 2);
 }
 
-// TEST_CASE("exception", "[ThisThreadExecutor::block_on(task)]") {
-//     ThisThreadExecutor executor;
-//     auto t = true;
-//     REQUIRE_THROWS_AS((executor.block_on([&]() -> Task<int> {
-//                           if (t) {
-//                               throw 1;
-//                           }
-//                           co_return 1 + 1;
-//                       }())),
-//                       int);
-// }
+TEST_CASE("exception", "[ThisThreadExecutor::block_on(task)]") {
+    ThisThreadExecutor executor;
+    auto t = true;
+    REQUIRE_THROWS_AS((executor.block_on([&]() -> Task<int> {
+                          if (t) {
+                              throw 1;
+                          }
+                          co_return 1 + 1;
+                      }())),
+                      int);
+}
 
 // TEST_CASE("void", "[ThisThreadExecutor::block_on(task)]") {
 //     ThisThreadExecutor executor;

@@ -54,15 +54,11 @@ public:
         Executor* ex;
     };
 
-    template </*todo: PromiseConcept*/ class T>
-    void push(Frame<T> frame) noexcept(false) {
-        frames.push(ErasedFrame{
-                .co = frame.co,
-                .ex = frame.ex,
-        });
+    void push(ErasedFrame frame) noexcept(false) {
+        frames.push(frame);
     }
 
-    ErasedFrame pop_erased() noexcept {
+    ErasedFrame pop() noexcept {
         ErasedFrame ret{.co = frames.top().co, .ex = frames.top().ex};
         frames.pop();
         return ret;
@@ -148,7 +144,7 @@ struct FinalAwaiter {
     std::coroutine_handle<> await_suspend(std::coroutine_handle<T> co) noexcept {
         auto stack = co.promise().stack.lock();
         rpc_assert(stack, Invariant{});
-        auto const frame = stack->pop_erased();
+        auto const frame = stack->pop();
 
         RPC_SCOPE_EXIT {
             frame.co.destroy();
@@ -247,7 +243,7 @@ public:
         auto const stack = this->stack.lock();
         rpc_assert(stack, Invariant{});
         rpc_assert(co, Invariant{});
-        stack->push(TaskStack::Frame<promise_type>{.co = co, .ex = current_executor});
+        stack->push(TaskStack::ErasedFrame{.co = co, .ex = current_executor});
         co.promise().stack = stack;
         return co;
     }
@@ -438,7 +434,7 @@ public:
                 Stack get_return_object() noexcept(false) {
                     Stack ret{std::make_shared<TaskStack>()};
                     stack = ret.stack;
-                    ret.stack->push(TaskStack::Frame<promise_type>{
+                    ret.stack->push(TaskStack::ErasedFrame{
                             .co = std::coroutine_handle<promise_type>::from_promise(
                                     *this),
                             .ex = current_executor});
@@ -462,8 +458,14 @@ public:
         };
 
         std::optional<T> ret;
+        std::optional<std::exception_ptr> exception;
+
         auto t = [&](auto task) -> Stack {
-            ret = co_await task;
+            try {
+                ret = co_await task;
+            } catch (...) {
+                exception = std::current_exception();
+            }
         }(std::move(task));
 
         while (true) {
@@ -512,6 +514,10 @@ public:
                                     : now;
 
             std::this_thread::sleep_until(soon);
+        }
+
+        if (exception) {
+            std::rethrow_exception(std::move(*exception));
         }
 
         return std::move(*ret);
