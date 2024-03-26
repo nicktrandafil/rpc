@@ -61,16 +61,29 @@ TEST_CASE("Common destruction order", "[ThisThreadExecutor::block_on(task)]") {
     REQUIRE(acc == 5);
 }
 
-// TEST_CASE("Await for result", "[ThisThreadExecutor::spawn(task)]") {
-//     ThisThreadExecutor executor;
-//     executor.block_on([&]() -> Task<void> {
-//         auto x = co_await executor.spawn([]() -> Task<int> {
-//             co_return 1 + 1;
-//         }());
-//         REQUIRE(x == 2);
-//         co_return;
-//     }());
-// }
+TEST_CASE("Await for result", "[ThisThreadExecutor::spawn(task)]") {
+    ThisThreadExecutor executor;
+    executor.block_on([&]() -> Task<void> {
+        auto x = co_await executor.spawn([]() -> Task<int> {
+            co_return 1 + 1;
+        }());
+        REQUIRE(x == 2);
+        co_return;
+    }());
+}
+
+TEST_CASE("Ignore result", "[ThisThreadExecutor::spawn(task)]") {
+    ThisThreadExecutor executor;
+    bool run = false;
+    executor.block_on([&]() -> Task<void> {
+        executor.spawn([&]() -> Task<int> {
+            run = true;
+            co_return 1 + 1;
+        }());
+        co_return;
+    }());
+    REQUIRE(run);
+}
 
 // TEST_CASE("Discard the handle", "[ThisThreadExecutor::spawn(task)]") {
 //     ThisThreadExecutor executor;

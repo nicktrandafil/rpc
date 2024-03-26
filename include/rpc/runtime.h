@@ -32,10 +32,12 @@ constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
     return 1024L * x;
 }
 
+class TaskStack;
+
 struct Executor {
-    virtual void spawn(std::function<void()>&& task) = 0; // todo: better function
-    virtual void spawn(std::function<void()>&& task,
-                       std::chrono::milliseconds after) = 0; // todo: better function
+    virtual void spawn(std::function<void()>&& task) = 0;
+    virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
+    virtual void cancel(TaskStack* x) noexcept = 0;
     virtual void increment_work() = 0;
     virtual void decrement_work() = 0;
     virtual ~Executor() = default;
@@ -59,7 +61,7 @@ public:
     }
 
     ErasedFrame pop() noexcept {
-        ErasedFrame ret{.co = frames.top().co, .ex = frames.top().ex};
+        ErasedFrame ret = frames.top();
         frames.pop();
         return ret;
     }
@@ -72,7 +74,7 @@ public:
     }
 
     ErasedFrame erased_top() const noexcept {
-        return ErasedFrame{.co = frames.top().co, .ex = frames.top().ex};
+        return frames.top();
     }
 
     template <class T>
@@ -125,6 +127,10 @@ public:
         result_index = Result::exception;
     }
 
+    size_t size() const noexcept {
+        return frames.size();
+    }
+
 private:
     enum class Result {
         none,
@@ -140,6 +146,22 @@ private:
 
 inline thread_local Executor* current_executor = nullptr;
 
+inline std::coroutine_handle<> resume(Executor* current_executor,
+                                      std::shared_ptr<TaskStack>&& stack) noexcept {
+    return current_executor == stack->erased_top().ex
+                 // immediately resume
+                 ? stack->erased_top().co
+
+                 // schedule
+                 : [stack = std::move(stack)]() -> std::coroutine_handle<> {
+        stack->erased_top().ex->spawn(
+                [stack = std::move(stack) /*todo: maybe to keep weak pointer?*/] {
+                    stack->erased_top().co.resume();
+                });
+        return std::noop_coroutine();
+    }();
+}
+
 template </*PromiseConcept*/ class T>
 struct FinalAwaiter {
     bool await_ready() const noexcept {
@@ -150,23 +172,10 @@ struct FinalAwaiter {
         auto stack = co.promise().stack.lock();
         rpc_assert(stack, Invariant{});
         auto const frame = stack->pop();
-
         RPC_SCOPE_EXIT {
             frame.co.destroy();
         };
-
-        return frame.ex == stack->erased_top().ex
-                     // immediately resume
-                     ? stack->erased_top().co
-
-                     // schedule
-                     : [stack = std::move(stack)]() -> std::coroutine_handle<> {
-            stack->erased_top().ex->spawn(
-                    [stack = std::move(stack) /*todo: maybe to keep weak pointer?*/] {
-                        stack->erased_top().co.resume();
-                    });
-            return std::noop_coroutine();
-        }();
+        return resume(frame.ex, std::move(stack));
     }
 
     void await_resume() noexcept {
@@ -207,8 +216,8 @@ class Task {
 public:
     Task() = delete;
 
-    Task(Task const&) = default;
-    Task& operator=(Task const&) = default;
+    Task(Task const&) = delete;
+    Task& operator=(Task const&) = delete;
 
     Task(Task&& rhs) = default;
     Task& operator=(Task&& rhs) = default;
@@ -260,7 +269,7 @@ public:
         return co;
     }
 
-    T await_resume() {
+    T await_resume() noexcept(false) {
         return std::move(*this).get_result();
     }
 
@@ -335,90 +344,139 @@ private:
 
     ErasedCoWeakRef continuation;
     Executor* executor = nullptr;
-}*/
-;
+};*/
 
-// template <class T>
-// class JoinHandle {
-// public:
-//     explicit JoinHandle(Task<T>&& task)
-//             : task{std::move(task)} {
-//     }
+template <class T>
+struct JoinHandle {
+    struct promise_type
+            : BasePromise
+            , std::conditional_t<std::is_void_v<T>,
+                                 ReturnVoid<promise_type>,
+                                 ReturnValue<promise_type>> {
+        std::optional<std::weak_ptr<TaskStack>> continuation;
 
-//     ~JoinHandle() {
-//         if (!task.co || task.co->done()) {
-//             return;
-//         }
+#if defined(__clang__)
+        promise_type(Task<T> const&, std::weak_ptr<TaskStack> x)
+                : BasePromise{std::move(x)} {
+        }
+#else
+        template <class U>
+        promise_type(U const&, Task<T> const&, std::weak_ptr<TaskStack> x)
+                : BasePromise{std::move(x)} {
+        }
+#endif
 
-//         auto co = task.co;
+        promise_type(promise_type const&) = delete;
+        promise_type& operator=(promise_type const&) = delete;
+        promise_type(promise_type&&) = delete;
+        promise_type& operator=(promise_type&&) = delete;
 
-//         auto pin = [](auto t) -> CoGuard {
-//             auto foo = std::move(t);
-//             co_return;
-//         }(std::move(task));
+        JoinHandle get_return_object() noexcept(false) {
+            auto const stack = this->stack.lock();
+            rpc_assert(stack, Invariant{});
+            auto const co = std::coroutine_handle<promise_type>::from_promise(*this);
+            stack->push(TaskStack::ErasedFrame{.co = co, .ex = current_executor});
+            return JoinHandle{co, stack};
+        }
 
-//         co->promise().continuation = ErasedCoWeakRef{pin.co};
-//     }
+        std::suspend_never initial_suspend() const noexcept {
+            return {};
+        }
 
-//     JoinHandle(JoinHandle const&) = delete;
-//     JoinHandle& operator=(JoinHandle const&) = delete;
-//     JoinHandle(JoinHandle&&) = default;
-//     JoinHandle& operator=(JoinHandle&&) = default;
+        auto final_suspend() const noexcept {
+            struct Awaiter {
+                std::weak_ptr<TaskStack> stack;
+                std::optional<std::weak_ptr<TaskStack>> continuation;
 
-//     void abort() const noexcept {
-//         rpc_todo();
-//     }
+                bool await_ready() const noexcept {
+                    return !continuation.has_value();
+                }
 
-//     bool await_ready() const noexcept {
-//         return task.co->done();
-//     }
+                std::coroutine_handle<> await_suspend(
+                        std::coroutine_handle<promise_type>) noexcept {
+                    auto our_stack = this->stack.lock();
+                    if (!our_stack) {
+                        return std::noop_coroutine();
+                    }
 
-//     template <class U>
-//     auto await_suspend(std::coroutine_handle<U> caller) noexcept {
-//         task.co->promise().continuation = ErasedCoWeakRef(caller);
-//     }
+                    auto const frame = our_stack->erased_top();
+                    auto continuation_stack = this->continuation.value().lock();
+                    if (!continuation_stack) {
+                        return std::noop_coroutine();
+                    }
 
-//     auto await_resume() noexcept {
-//         return task.await_resume();
-//     }
+                    return resume(frame.ex, std::move(continuation_stack));
+                }
 
-// private:
-//     struct CoGuard {
-//         struct promise_type : public InsideCoRefRecord {
-//             promise_type()
-//                     : InsideCoRefRecord(
-//                             std::coroutine_handle<promise_type>::from_promise(*this)
-//                                     .address()) {
-//                 inc_refs();
-//             }
+                void await_resume() noexcept {
+                    auto our_stack = this->stack.lock();
+                    if (!our_stack) {
+                        return;
+                    }
+                    our_stack->pop();
+                    rpc_assert(our_stack->size() == 0, Invariant{});
+                }
+            };
 
-//             CoGuard get_return_object() {
-//                 return
-//                 CoGuard{std::coroutine_handle<promise_type>::from_promise(*this)};
-//             }
+            return Awaiter{stack, continuation};
+        }
+    };
 
-//             std::suspend_always initial_suspend() noexcept {
-//                 return {};
-//             }
+    bool await_ready() const noexcept {
+        auto const stack = this->stack.lock();
+        rpc_assert(stack, Invariant{});
+        return stack->size() == 0;
+    }
 
-//             std::suspend_always final_suspend() noexcept {
-//                 dec_refs();
-//                 return {};
-//             }
+    template <class U>
+    bool await_suspend(std::coroutine_handle<U> caller) const noexcept(false) {
+        auto const our_stack = this->stack.lock();
+        rpc_assert(our_stack, Invariant{});
+        rpc_assert(co, Invariant{});
+        if (await_ready()) {
+            return false;
+        } else {
+            co.promise().continuation = caller.promise().stack;
+            return true;
+        }
+    }
 
-//             void return_void() noexcept {
-//             }
+    T await_resume() noexcept(false) {
+        return std::move(*this).get_result();
+    }
 
-//             void unhandled_exception() noexcept {
-//             }
-//         };
+    T get_result() && noexcept(false) {
+        auto const stack = this->stack.lock();
+        if (!stack) {
+            throw std::runtime_error("canceled");
+        }
 
-//         std::coroutine_handle<promise_type> co;
-//     };
+        rpc_assert(stack, Invariant{});
+        return stack->template take_result<T>();
+    }
 
-// private:
-//     Task<T> task;
-// };
+    JoinHandle(std::coroutine_handle<promise_type> co,
+               std::weak_ptr<TaskStack> stack) noexcept
+            : co{co}
+            , stack{std::move(stack)} {
+        executor = current_executor;
+    }
+
+    JoinHandle(JoinHandle const&) = delete;
+    JoinHandle& operator=(JoinHandle const&) = delete;
+
+    JoinHandle(JoinHandle&&) = default;
+    JoinHandle& operator=(JoinHandle&&) = default;
+
+    void abort() {
+        // todo: don't abort if already done
+        executor->cancel(stack.lock().get());
+    }
+
+    Executor* executor;
+    std::coroutine_handle<promise_type> co;
+    std::weak_ptr<TaskStack> stack;
+};
 
 class ThisThreadExecutor final : public Executor {
 public:
@@ -513,11 +571,24 @@ public:
         return t.stack->template take_result<T>();
     }
 
-    // template <class T>
-    // JoinHandle<T> spawn(Task<T>&& task) {
-    //     task.resume();
-    //     return JoinHandle<T>{std::move(task)};
-    // }
+    template <class T>
+    JoinHandle<T> spawn(Task<T>&& task) {
+        current_executor = this;
+        spawned_tasks.emplace_back(std::make_shared<TaskStack>());
+        auto t = [&](Task<T> task, std::weak_ptr<TaskStack>) -> JoinHandle<T> {
+            co_return co_await task;
+        }(std::move(task), spawned_tasks.back());
+        return t;
+    }
+
+    void cancel(TaskStack* x) noexcept override {
+        auto const it = std::find_if(
+                spawned_tasks.begin(), spawned_tasks.end(), [x](auto const& y) {
+                    return y.get() == x;
+                });
+        rpc_assert(it != spawned_tasks.end(), Invariant{});
+        spawned_tasks.erase(it);
+    }
 
 private:
     void spawn(std::function<void()>&& task) override {
@@ -544,6 +615,7 @@ private:
     static constexpr size_t r = 10;
     std::vector<Work> tasks;
     std::vector<DelayedWork> delayed_tasks;
+    std::vector<std::shared_ptr<TaskStack>> spawned_tasks;
     size_t work{0};
 };
 
