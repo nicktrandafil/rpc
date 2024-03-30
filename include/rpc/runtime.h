@@ -346,6 +346,14 @@ private:
     Executor* executor = nullptr;
 };*/
 
+class Error : std::exception {};
+
+class Canceled : Error {
+    char const* what() const noexcept override {
+        return "canceled";
+    }
+};
+
 template <class T>
 struct JoinHandle {
     struct promise_type
@@ -394,12 +402,16 @@ struct JoinHandle {
 
                 std::coroutine_handle<> await_suspend(
                         std::coroutine_handle<promise_type>) noexcept {
-                    auto our_stack = this->stack.lock();
+                    auto const our_stack = this->stack.lock();
                     if (!our_stack) {
                         return std::noop_coroutine();
                     }
 
                     auto const frame = our_stack->erased_top();
+                    RPC_SCOPE_EXIT {
+                        frame.co.destroy();
+                    };
+
                     auto continuation_stack = this->continuation.value().lock();
                     if (!continuation_stack) {
                         return std::noop_coroutine();
@@ -409,14 +421,16 @@ struct JoinHandle {
                 }
 
                 void await_resume() noexcept {
-                    auto our_stack = this->stack.lock();
-                    if (!our_stack) {
-                        return;
+                    if (auto const our_stack = this->stack.lock()) {
+                        our_stack->pop();
+                        rpc_assert(our_stack->size() == 0, Invariant{});
                     }
-                    our_stack->pop();
-                    rpc_assert(our_stack->size() == 0, Invariant{});
                 }
             };
+
+            auto const stack = this->stack.lock();
+            rpc_assert(stack, Invariant{});
+            current_executor->cancel(stack.get());
 
             return Awaiter{stack, continuation};
         }
@@ -424,8 +438,7 @@ struct JoinHandle {
 
     bool await_ready() const noexcept {
         auto const stack = this->stack.lock();
-        rpc_assert(stack, Invariant{});
-        return stack->size() == 0;
+        return !stack || stack->size() == 0;
     }
 
     template <class U>
@@ -448,7 +461,7 @@ struct JoinHandle {
     T get_result() && noexcept(false) {
         auto const stack = this->stack.lock();
         if (!stack) {
-            throw std::runtime_error("canceled");
+            throw Canceled{};
         }
 
         rpc_assert(stack, Invariant{});
@@ -456,9 +469,10 @@ struct JoinHandle {
     }
 
     JoinHandle(std::coroutine_handle<promise_type> co,
-               std::weak_ptr<TaskStack> stack) noexcept
+               std::shared_ptr<TaskStack> stack) noexcept
             : co{co}
-            , stack{std::move(stack)} {
+            , stack{stack}
+            , stack_guard{std::move(stack)} {
         executor = current_executor;
     }
 
@@ -469,13 +483,17 @@ struct JoinHandle {
     JoinHandle& operator=(JoinHandle&&) = default;
 
     void abort() {
-        // todo: don't abort if already done
-        executor->cancel(stack.lock().get());
+        if (!await_ready()) {
+            stack_guard.reset();
+            executor->cancel(stack.lock().get());
+        }
     }
 
     Executor* executor;
     std::coroutine_handle<promise_type> co;
+
     std::weak_ptr<TaskStack> stack;
+    std::shared_ptr<TaskStack> stack_guard;
 };
 
 class ThisThreadExecutor final : public Executor {
@@ -619,11 +637,10 @@ private:
     size_t work{0};
 };
 
-/*class Sleep {
+class Sleep {
 public:
     explicit Sleep(std::chrono::milliseconds dur) noexcept
-            : dur{dur}
-            , executor{current_executor} {
+            : dur{dur} {
     }
 
     bool await_ready() const noexcept {
@@ -632,11 +649,12 @@ public:
 
     template <class T>
     void await_suspend(std::coroutine_handle<T> caller) {
-        rpc_assert(executor, Invariant{});
-        executor->spawn(
-                [caller = ErasedCoWeakRef{caller}]() mutable {
-                    if (auto r = caller.lock()) {
-                        r->resume();
+        auto caller_stack = caller.promise().stack.lock();
+        rpc_assert(caller_stack, Invariant{});
+        caller_stack->erased_top().ex->spawn(
+                [caller_stack = std::weak_ptr{caller_stack}]() mutable {
+                    if (auto const r = caller_stack.lock()) {
+                        r->erased_top().co.resume();
                     }
                 },
                 dur);
@@ -647,8 +665,6 @@ public:
 
 private:
     std::chrono::milliseconds dur;
-    Executor* executor;
-}*/
-;
+};
 
 } // namespace rpc
