@@ -73,6 +73,18 @@ TEST_CASE("await for result", "[ThisThreadExecutor::spawn(Task<T>)]") {
     }());
 }
 
+TEST_CASE("ignore result", "[Sleep]") {
+    ThisThreadExecutor executor;
+    auto const start = std::chrono::steady_clock::now();
+    executor.block_on([&]() -> Task<void> {
+        co_await Sleep{5ms};
+        co_return;
+    }());
+    auto const end = std::chrono::steady_clock::now();
+    REQUIRE(5ms <= end - start);
+    REQUIRE(end - start < 10ms);
+}
+
 TEST_CASE("ignore result", "[ThisThreadExecutor::spawn(Task<T>)]") {
     ThisThreadExecutor executor;
     bool run = false;
@@ -101,42 +113,56 @@ TEST_CASE("use some sleep to actually enter the block_on loop",
     REQUIRE(run);
 }
 
-// TEST_CASE("abort", "[ThisThreadExecutor::spawn(Task<T>)]") {
-//     ThisThreadExecutor executor;
-//     bool run = false;
-//     bool exception = false;
-//     executor.block_on([&]() -> Task<void> {
-//         auto handle = executor.spawn([&]() -> Task<void> {
-//             co_await Sleep{5ms};
-//             run = true;
-//             co_return;
-//         }());
-
-//         co_await Sleep{1ms};
-//         handle.abort();
-
-//         try {
-//             co_await handle;
-//         } catch (Canceled const& e) {
-//             exception = true;
-//         }
-
-//         co_return;
-//     }());
-//     REQUIRE(!run);
-//     REQUIRE(exception);
-// }
-
-TEST_CASE("ignore result", "[Sleep]") {
+TEST_CASE("abort", "[ThisThreadExecutor::spawn(Task<T>)]") {
     ThisThreadExecutor executor;
-    auto const start = std::chrono::steady_clock::now();
+    bool run = false;
+    bool exception = false;
     executor.block_on([&]() -> Task<void> {
-        co_await Sleep{5ms};
+        auto handle = executor.spawn([](bool& run) -> Task<void> {
+            co_await Sleep{5ms};
+            run = true;
+            co_return;
+        }(run));
+
+        co_await Sleep{1ms};
+        handle.abort();
+
+        try {
+            co_await handle;
+        } catch (Canceled const&) {
+            exception = true;
+        }
+
         co_return;
     }());
-    auto const end = std::chrono::steady_clock::now();
-    REQUIRE(5ms <= end - start);
-    REQUIRE(end - start < 10ms);
+    REQUIRE(!run);
+    REQUIRE(exception);
+}
+
+TEST_CASE("abort already ready task does nothing",
+          "[ThisThreadExecutor::spawn(Task<T>)]") {
+    ThisThreadExecutor executor;
+    bool run = false;
+    bool exception = false;
+    executor.block_on([&]() -> Task<void> {
+        auto handle = executor.spawn([](bool& run) -> Task<void> {
+            run = true;
+            co_return;
+        }(run));
+
+        co_await Sleep{1ms};
+        handle.abort();
+
+        try {
+            co_await handle;
+        } catch (Canceled const&) {
+            exception = true;
+        }
+
+        co_return;
+    }());
+    REQUIRE(run);
+    REQUIRE(!exception);
 }
 
 // TEST_CASE("Discard the handle", "[ThisThreadExecutor::spawn(task)]") {

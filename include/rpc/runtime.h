@@ -113,6 +113,9 @@ public:
         static_assert(sizeof(val) <= sizeof(result_value));
         rpc_assert(result_index == Result::none, Invariant{});
         new (&result_value) T(std::forward<T>(val));
+        destroy_value = +[](void* x) {
+            static_cast<T*>(x)->~T();
+        };
         result_index = Result::value;
     }
 
@@ -131,6 +134,17 @@ public:
         return frames.size();
     }
 
+    ~TaskStack() noexcept {
+        while (!frames.empty()) {
+            frames.top().co.destroy();
+            frames.pop();
+        }
+
+        if (result_index == Result::value && destroy_value != nullptr) {
+            destroy_value(&result_value);
+        }
+    }
+
 private:
     enum class Result {
         none,
@@ -139,6 +153,7 @@ private:
     } result_index;
     std::exception_ptr result_exception;
     std::aligned_storage_t<10_KB, alignof(std::max_align_t)> result_value;
+    void (*destroy_value)(void*) = nullptr;
 
     std::stack<ErasedFrame, std::vector<ErasedFrame>>
             frames; // todo: allocator optimization
@@ -529,6 +544,9 @@ public:
                 }
 
                 std::suspend_never final_suspend() const noexcept {
+                    auto const stack = this->stack.lock();
+                    rpc_assert(stack, Invariant{});
+                    stack->pop();
                     return {};
                 }
             };
