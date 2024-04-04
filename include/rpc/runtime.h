@@ -114,11 +114,12 @@ public:
 
     template <class T>
     void put_result(T&& val) noexcept(noexcept(std::forward<T>(val))) {
+        using U = std::decay_t<T>;
         static_assert(sizeof(val) <= sizeof(result_value));
         rpc_assert(result_index == Result::none, Invariant{});
-        new (&result_value) T(std::forward<T>(val));
+        new (&result_value) U(std::forward<T>(val));
         destroy_value = +[](void* x) {
-            static_cast<T*>(x)->~T();
+            static_cast<U*>(x)->~U();
         };
         result_index = Result::value;
     }
@@ -217,15 +218,19 @@ template <class In>
 struct ReturnValue {
     template <class U>
     void return_value(U&& val) noexcept(noexcept(std::decay_t<U>(std::forward<U>(val)))) {
+        using T = typename In::ValueType;
+        static_assert(std::is_convertible_v<U, T>,
+                      "return expression should be convertible to return type");
         auto const stack = static_cast<In*>(this)->stack.lock();
         rpc_assert(stack, Invariant{});
-        stack->put_result(std::forward<U>(val));
+        stack->template put_result<T>(std::forward<U>(val));
     }
 };
 
 template <class In>
 struct ReturnVoid {
     void return_void() noexcept {
+        static_assert(std::is_void_v<typename In::ValueType>);
         auto const stack = static_cast<In*>(this)->stack.lock();
         rpc_assert(stack, Invariant{});
         stack->put_result();
@@ -248,6 +253,8 @@ public:
             , std::conditional_t<std::is_void_v<T>,
                                  ReturnVoid<promise_type>,
                                  ReturnValue<promise_type>> {
+        using ValueType = T;
+
         promise_type() = default;
 
         promise_type(promise_type const&) = delete;
@@ -308,7 +315,7 @@ public:
     std::weak_ptr<TaskStack> stack;
 };
 
-/*class ConditionalVariable {
+class ConditionalVariable {
 public:
     ConditionalVariable() = default;
 
@@ -320,17 +327,18 @@ public:
 
     void notify() noexcept {
         if (auto c = this->continuation.lock()) {
-            rpc_assert(executor, Invariant{});
-            executor->spawn([c]() mutable {
-                if (c) {
-                    c->resume();
-                }
-            });
+            if (c->erased_top().ex == current_executor) {
+                c->erased_top().co.resume();
+            } else {
+                c->erased_top().ex->spawn([c]() mutable {
+                    c->erased_top().co.resume();
+                });
+            }
         }
     }
 
-    auto wait(std::unique_lock<std::mutex>& lock) noexcept {
-        return Awaiter{this, &lock};
+    auto wait() {
+        return Awaiter{this};
     }
 
 private:
@@ -343,29 +351,20 @@ private:
         }
 
         template <class U>
-        void await_suspend(std::coroutine_handle<U> c) noexcept {
-            rpc_assert(current_executor, Invariant{});
+        void await_suspend(std::coroutine_handle<U> continuation) noexcept {
             current_executor->increment_work();
-            cv->executor = current_executor;
-            cv->continuation = ErasedCoWeakRef{c};
-            lock->unlock();
+            cv->continuation = continuation.promise().stack;
         }
 
-        ~Awaiter() {
-            rpc_assert(current_executor == cv->executor, Invariant{});
+        ~Awaiter() noexcept {
             current_executor->decrement_work();
-            cv->continuation = ErasedCoWeakRef{};
-            cv->executor = nullptr;
-            lock->lock();
         }
 
         ConditionalVariable* cv;
-        std::unique_lock<std::mutex>* lock;
     };
 
-    ErasedCoWeakRef continuation;
-    Executor* executor = nullptr;
-};*/
+    std::weak_ptr<TaskStack> continuation;
+};
 
 struct Error : std::exception {};
 
@@ -410,6 +409,8 @@ struct JoinHandle {
             , std::conditional_t<std::is_void_v<T>,
                                  ReturnVoid<promise_type>,
                                  ReturnValue<promise_type>> {
+        using ValueType = T;
+
         std::optional<std::weak_ptr<TaskStack>> continuation;
 
 #if defined(__clang__)
@@ -582,6 +583,8 @@ public:
                     , std::conditional_t<std::is_void_v<T>,
                                          ReturnVoid<promise_type>,
                                          ReturnValue<promise_type>> {
+                using ValueType [[maybe_unused]] = T;
+
                 Stack get_return_object() noexcept(false) {
                     Stack ret{std::make_shared<TaskStack>()};
                     stack = ret.stack;

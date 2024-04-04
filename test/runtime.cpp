@@ -194,32 +194,24 @@ TEST_CASE("abort already ready task does nothing",
 //     REQUIRE(!exception);
 // }
 
-// TEST_CASE("Discard the handle", "[ThisThreadExecutor::spawn(task)]") {
-//     ThisThreadExecutor executor;
-//     int effect = 0;
-//     executor.block_on([&]() -> Task<void> {
-//         executor.spawn([](int* effect) -> Task<void> {
-//             *effect = 1;
-//             co_return;
-//         }(&effect));
-//         co_return;
-//     }());
-//     REQUIRE(effect == 1);
-// }
+TEST_CASE("", "[ConditionalVariable]") {
+    ThisThreadExecutor executor;
+    int counter = 0;
+    executor.block_on([&]() -> Task<void> {
+        ConditionalVariable cv;
 
-// TEST_CASE("Abort", "[ThisThreadExecutor::spawn(task)]") {
-//     ThisThreadExecutor executor;
-//     int effect = 0;
-//     executor.block_on([&]() -> Task<void> {
-//         auto h = executor.spawn([](int* effect) -> Task<void> {
-//             co_await Sleep{2ms};
-//             *effect = 1;
-//             co_return;
-//         }(&effect));
-//         co_await Sleep{1ms};
-//         h.abort();
-//         co_await h;
-//         co_return;
-//     }());
-//     REQUIRE(effect == 1);
-// }
+        executor.spawn([](int* counter, ConditionalVariable* cv) -> Task<void> {
+            auto const start = std::chrono::steady_clock::now();
+            co_await cv->wait();
+            auto const elapsed = std::chrono::steady_clock::now() - start;
+            *counter += 2;
+            REQUIRE(5ms < elapsed);
+            REQUIRE(elapsed < 6ms);
+            co_return;
+        }(&counter, &cv));
+
+        co_await Sleep{5ms};
+        cv.notify();
+    }());
+    REQUIRE(counter == 2);
+}
