@@ -5,6 +5,7 @@
 
 #include <sys/epoll.h>
 
+#include <any>
 #include <coroutine>
 #include <cstdio>
 #include <cstring>
@@ -26,6 +27,9 @@
 
 #define rpc_print(...) std::format_to(std::ostreambuf_iterator{std::cout}, __VA_ARGS__)
 
+#define ensure_invariant(x, msg)
+#define relay_on_invariant(x, msg)
+
 namespace rpc {
 
 constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
@@ -38,6 +42,7 @@ struct Executor {
     virtual void spawn(std::function<void()>&& task) = 0;
     virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
     virtual void cancel(TaskStack* x) noexcept = 0;
+    virtual void guard(std::shared_ptr<TaskStack> x) noexcept(false) = 0;
     virtual void increment_work() = 0;
     virtual void decrement_work() = 0;
     virtual ~Executor() = default;
@@ -361,12 +366,40 @@ private:
     Executor* executor = nullptr;
 };*/
 
-class Error : std::exception {};
+struct Error : std::exception {};
 
-class Canceled : Error {
+template <class T = void>
+struct VoidFriendlyResult {
+    T inner;
+};
+
+template <>
+struct VoidFriendlyResult<void> {};
+
+class Canceled : public Error {
+public:
+    Canceled() = default;
+
+    template <class T>
+    explicit Canceled(/*not forwarding*/ VoidFriendlyResult<T>&& t) noexcept(false)
+            : result{std::move(t)} {
+    }
+
+    bool was_already_completed() const noexcept {
+        return result.has_value();
+    }
+
+    template <class T>
+    T get_result() const noexcept(false) {
+        std::any_cast<T>(result);
+    }
+
     char const* what() const noexcept override {
         return "canceled";
     }
+
+private:
+    std::any result;
 };
 
 template <class T>
@@ -479,7 +512,17 @@ struct JoinHandle {
             throw Canceled{};
         }
 
-        rpc_assert(stack, Invariant{});
+        if (!stack_guard) {
+            if constexpr (std::is_same_v<T, void>) {
+                stack->template take_result<T>();
+                throw Canceled{VoidFriendlyResult{}};
+            } else {
+                throw Canceled{VoidFriendlyResult{stack->template take_result<T>()}};
+            }
+        }
+
+        this->stack.reset();
+
         return stack->template take_result<T>();
     }
 
@@ -497,10 +540,15 @@ struct JoinHandle {
     JoinHandle(JoinHandle&&) = default;
     JoinHandle& operator=(JoinHandle&&) = default;
 
+    ~JoinHandle() noexcept(false) {
+        if (stack_guard) {
+            executor->guard(stack_guard);
+        }
+    }
+
     void abort() {
         if (!await_ready()) {
             stack_guard.reset();
-            executor->cancel(stack.lock().get());
         }
     }
 
@@ -610,10 +658,10 @@ public:
     template <class T>
     JoinHandle<T> spawn(Task<T>&& task) {
         current_executor = this;
-        spawned_tasks.emplace_back(std::make_shared<TaskStack>());
+        auto stack = std::make_shared<TaskStack>();
         auto t = [&](Task<T> task, std::weak_ptr<TaskStack>) -> JoinHandle<T> {
             co_return co_await task;
-        }(std::move(task), spawned_tasks.back());
+        }(std::move(task), stack);
         return t;
     }
 
@@ -624,6 +672,10 @@ public:
                 });
         rpc_assert(it != spawned_tasks.end(), Invariant{});
         spawned_tasks.erase(it);
+    }
+
+    void guard(std::shared_ptr<TaskStack> x) noexcept(false) override {
+        spawned_tasks.push_back(std::move(x));
     }
 
 private:
