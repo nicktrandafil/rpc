@@ -27,8 +27,7 @@
 
 #define rpc_print(...) std::format_to(std::ostreambuf_iterator{std::cout}, __VA_ARGS__)
 
-#define ensure_invariant(x, msg)
-#define relay_on_invariant(x, msg)
+#define feature(x, msg) x
 
 namespace rpc {
 
@@ -41,8 +40,8 @@ class TaskStack;
 struct Executor {
     virtual void spawn(std::function<void()>&& task) = 0;
     virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
-    virtual void cancel(TaskStack* x) noexcept = 0;
-    virtual void guard(std::shared_ptr<TaskStack> x) noexcept(false) = 0;
+    virtual void remove_guard(TaskStack* x) noexcept = 0;
+    virtual void add_guard(std::shared_ptr<TaskStack> x) noexcept(false) = 0;
     virtual void increment_work() = 0;
     virtual void decrement_work() = 0;
     virtual ~Executor() = default;
@@ -175,7 +174,9 @@ inline std::coroutine_handle<> resume(Executor* current_executor,
                  // schedule
                  : [stack = std::move(stack)]() -> std::coroutine_handle<> {
         stack->erased_top().ex->spawn(
-                [stack = std::move(stack) /*todo: maybe to keep weak pointer?*/] {
+                [feature(stack = std::move(stack),
+                         "Have both abort signal and ready result set in JoinHandle "
+                         "in case of a race condition")] {
                     stack->erased_top().co.resume();
                 });
         return std::noop_coroutine();
@@ -390,8 +391,8 @@ public:
     }
 
     template <class T>
-    T get_result() const noexcept(false) {
-        std::any_cast<T>(result);
+    VoidFriendlyResult<T> get_result() const noexcept(false) {
+        std::any_cast<VoidFriendlyResult<T>>(result);
     }
 
     char const* what() const noexcept override {
@@ -478,7 +479,9 @@ struct JoinHandle {
 
             auto const stack = this->stack.lock();
             rpc_assert(stack, Invariant{});
-            current_executor->cancel(stack.get());
+            feature(current_executor->remove_guard(stack.get()),
+                    "Have both abort signal and ready result set in JoinHandle in case "
+                    "of a race condition");
 
             return Awaiter{stack, continuation};
         }
@@ -540,21 +543,23 @@ struct JoinHandle {
     JoinHandle(JoinHandle&&) = default;
     JoinHandle& operator=(JoinHandle&&) = default;
 
-    ~JoinHandle() noexcept /*todo: ensure noexcept*/ {
+    ~JoinHandle() /*noexcept(false) todo: ensure noexcept*/ {
         if (stack_guard) {
-            executor->guard(stack_guard);
+            executor->add_guard(stack_guard);
         }
     }
 
-    void abort() {
+    bool abort() {
         if (!await_ready()) {
             stack_guard.reset();
+            return true;
+        } else {
+            return false;
         }
     }
 
     Executor* executor;
     std::coroutine_handle<promise_type> co;
-
     std::weak_ptr<TaskStack> stack;
     std::shared_ptr<TaskStack> stack_guard;
 };
@@ -665,17 +670,14 @@ public:
         return t;
     }
 
-    void cancel(TaskStack* x) noexcept override {
-        auto const it = std::find_if(
-                spawned_tasks.begin(), spawned_tasks.end(), [x](auto const& y) {
-                    return y.get() == x;
-                });
-        rpc_assert(it != spawned_tasks.end(), Invariant{});
-        spawned_tasks.erase(it);
+    void add_guard(std::shared_ptr<TaskStack> x) noexcept(false) override {
+        spawned_tasks.push_back(std::move(x));
     }
 
-    void guard(std::shared_ptr<TaskStack> x) noexcept(false) override {
-        spawned_tasks.push_back(std::move(x));
+    void remove_guard(TaskStack* x) noexcept override {
+        std::erase_if(spawned_tasks, [x](auto const& y) {
+            return y.get() == x;
+        });
     }
 
 private:

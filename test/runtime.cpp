@@ -125,7 +125,7 @@ TEST_CASE("abort", "[ThisThreadExecutor::spawn(Task<T>)]") {
         }(run));
 
         co_await Sleep{1ms};
-        handle.abort();
+        REQUIRE(handle.abort());
 
         try {
             co_await handle;
@@ -151,7 +151,7 @@ TEST_CASE("abort already ready task does nothing",
         }(run));
 
         co_await Sleep{1ms};
-        handle.abort();
+        REQUIRE(!handle.abort());
 
         try {
             co_await handle;
@@ -164,6 +164,35 @@ TEST_CASE("abort already ready task does nothing",
     REQUIRE(run);
     REQUIRE(!exception);
 }
+
+// todo: need multi-threaded executor for this
+// TEST_CASE("the task was already completed by the abort time",
+//           "[ThisThreadExecutor::spawn(Task<T>)]") {
+//     ThisThreadExecutor executor;
+//     bool run = false;
+//     bool exception = false;
+//     executor.block_on([&]() -> Task<void> {
+//         auto handle = executor.spawn([](bool& run) -> Task<void> {
+//             run = true;
+//             std::this_thread::sleep_for(2ms);
+//             co_return;
+//         }(run));
+
+//         co_await Sleep{1ms};
+//         REQUIRE(handle.abort());
+
+//         try {
+//             co_await handle;
+//         } catch (Canceled const& x) {
+//             REQUIRE(x.was_already_completed());
+//             exception = true;
+//         }
+
+//         co_return;
+//     }());
+//     REQUIRE(run);
+//     REQUIRE(!exception);
+// }
 
 // TEST_CASE("Discard the handle", "[ThisThreadExecutor::spawn(task)]") {
 //     ThisThreadExecutor executor;
