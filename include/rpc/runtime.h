@@ -540,7 +540,7 @@ struct JoinHandle {
     JoinHandle(JoinHandle&&) = default;
     JoinHandle& operator=(JoinHandle&&) = default;
 
-    ~JoinHandle() noexcept(false) {
+    ~JoinHandle() noexcept /*todo: ensure noexcept*/ {
         if (stack_guard) {
             executor->guard(stack_guard);
         }
