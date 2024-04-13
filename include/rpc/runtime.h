@@ -279,11 +279,6 @@ public:
             return Task(std::coroutine_handle<promise_type>::from_promise(*this));
         }
 
-        // todo: All the operations performed in `await_suspend` can be performed here,
-        // but then the caller coroutine would resume before the current coroutine is
-        // destroyed. We cannot destroy the current coroutine here because it has not yet
-        // been suspended. If we move the contents of `await_suspend` here, we would
-        // sacrifice the guaranteed destruction order.
         std::suspend_always initial_suspend() noexcept {
             return {};
         }
