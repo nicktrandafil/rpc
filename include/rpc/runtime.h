@@ -166,20 +166,29 @@ private:
 
 inline thread_local Executor* current_executor = nullptr;
 
+inline void schedule(std::shared_ptr<TaskStack> stack) {
+    stack->erased_top().ex->spawn(
+            [feature(stack = std::move(stack),
+                     "Have both abort signal and ready result set in JoinHandle "
+                     "in case of a race condition")] {
+                stack->erased_top().co.resume();
+            });
+}
+
+inline bool schedule_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
+    return !stack
+        || (stack->erased_top().ex != current_executor
+            && (schedule(std::move(stack)), true));
+}
+
 inline std::coroutine_handle<> resume(Executor* current_executor,
                                       std::shared_ptr<TaskStack>&& stack) noexcept {
     return current_executor == stack->erased_top().ex
                  // immediately resume
                  ? stack->erased_top().co
-
                  // schedule
                  : [stack = std::move(stack)]() -> std::coroutine_handle<> {
-        stack->erased_top().ex->spawn(
-                [feature(stack = std::move(stack),
-                         "Have both abort signal and ready result set in JoinHandle "
-                         "in case of a race condition")] {
-                    stack->erased_top().co.resume();
-                });
+        schedule(std::move(stack));
         return std::noop_coroutine();
     }();
 }
@@ -443,48 +452,41 @@ struct JoinHandle {
 
         auto final_suspend() const noexcept {
             struct Awaiter {
-                std::weak_ptr<TaskStack> stack;
                 std::optional<std::weak_ptr<TaskStack>> continuation;
 
                 bool await_ready() const noexcept {
-                    return !continuation.has_value();
+                    return !continuation.has_value()
+                        || schedule_on_other_ex(continuation->lock());
                 }
 
                 std::coroutine_handle<> await_suspend(
-                        std::coroutine_handle<promise_type>) noexcept {
-                    auto const our_stack = this->stack.lock();
-                    if (!our_stack) {
-                        return std::noop_coroutine();
-                    }
-
-                    auto const frame = our_stack->erased_top();
+                        std::coroutine_handle<promise_type> co) noexcept {
                     RPC_SCOPE_EXIT {
-                        frame.co.destroy();
+                        co.destroy();
                     };
 
-                    auto continuation_stack = this->continuation.value().lock();
-                    if (!continuation_stack) {
+                    // no continuation, do nothing
+                    auto continuation = this->continuation.value().lock();
+                    if (!continuation) {
                         return std::noop_coroutine();
                     }
 
-                    return resume(frame.ex, std::move(continuation_stack));
+                    // resume immediately
+                    return continuation->erased_top().co;
                 }
 
                 void await_resume() noexcept {
-                    if (auto const our_stack = this->stack.lock()) {
-                        our_stack->pop();
-                        rpc_assert(our_stack->size() == 0, Invariant{});
-                    }
                 }
             };
 
             auto const stack = this->stack.lock();
             rpc_assert(stack, Invariant{});
+            stack->pop();
             feature(current_executor->remove_guard(stack.get()),
                     "Have both abort signal and ready result set in JoinHandle in case "
                     "of a race condition");
 
-            return Awaiter{stack, continuation};
+            return Awaiter{continuation};
         }
     };
 
@@ -525,7 +527,7 @@ struct JoinHandle {
             }
         }
 
-        this->stack.reset();
+        this->stack_guard.reset();
 
         return stack->template take_result<T>();
     }
@@ -740,6 +742,96 @@ public:
 
 private:
     std::chrono::milliseconds dur;
+};
+
+template <class TaskT /*Coroutine Concept*/>
+class Timeout {
+public:
+    explicit Timeout(std::chrono::milliseconds, TaskT&& task) {
+        using T = typename TaskT::promise_type::ValueType;
+
+        struct Stack {
+            std::shared_ptr<TaskStack> stack;
+
+            struct promise_type
+                    : BasePromise
+                    , std::conditional_t<std::is_void_v<T>,
+                                         ReturnVoid<promise_type>,
+                                         ReturnValue<promise_type>> {
+                using ValueType [[maybe_unused]] = T;
+
+                std::weak_ptr<TaskStack> continuation;
+
+                Stack get_return_object() noexcept(false) {
+                    Stack ret{std::make_shared<TaskStack>()};
+                    stack = ret.stack;
+                    ret.stack->push(TaskStack::ErasedFrame{
+                            .co = std::coroutine_handle<promise_type>::from_promise(
+                                    *this),
+                            .ex = current_executor});
+                    return ret;
+                }
+
+                std::suspend_never initial_suspend() const noexcept {
+                    return {};
+                }
+
+                auto final_suspend() const noexcept {
+                    struct Awaiter {
+                        std::shared_ptr<TaskStack> stack;
+                        std::weak_ptr<TaskStack> continuation;
+
+                        bool await_ready() const noexcept {
+                            return schedule_on_other_ex(this->continuation.lock());
+                        }
+
+                        std::coroutine_handle<> await_suspend(
+                                std::coroutine_handle<promise_type> co) noexcept {
+                            RPC_SCOPE_EXIT {
+                                co.destroy();
+                            };
+
+                            // no continuation, do nothing
+                            auto continuation = this->continuation.lock();
+                            if (!continuation) {
+                                return std::noop_coroutine();
+                            }
+
+                            // resume immediately
+                            return continuation->erased_top().co;
+                        }
+
+                        void await_resume() noexcept {
+                        }
+                    };
+
+                    auto const stack = this->stack.lock();
+                    rpc_assert(stack, Invariant{});
+                    stack->pop();
+                    rpc_assert(stack->size() == 0, Invariant{});
+
+                    return Awaiter{continuation};
+                }
+            };
+        };
+
+        // clang-format off
+        stack = [](auto task) -> Stack {
+            co_return co_await task;
+        }(std::move(task)).stack;
+        // clang-format on
+    }
+
+    bool await_ready() noexcept {
+        return false;
+    }
+
+    template <class T>
+    void await_suspend(std::coroutine_handle<T> caller) {
+    }
+
+private:
+    std::shared_ptr<TaskStack> stack;
 };
 
 } // namespace rpc
