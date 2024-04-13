@@ -176,9 +176,13 @@ inline void schedule(std::shared_ptr<TaskStack> stack) {
 }
 
 inline bool schedule_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
-    return !stack
-        || (stack->erased_top().ex != current_executor
-            && (schedule(std::move(stack)), true));
+    rpc_assert(stack, Invariant{});
+    return stack->erased_top().ex != current_executor
+        && (schedule(std::move(stack)), true);
+}
+
+inline bool schedule_continuation_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
+    return !stack || schedule_on_other_ex(std::move(stack));
 }
 
 inline std::coroutine_handle<> resume(Executor* current_executor,
@@ -193,20 +197,20 @@ inline std::coroutine_handle<> resume(Executor* current_executor,
     }();
 }
 
-template </*PromiseConcept*/ class T>
 struct FinalAwaiter {
+    std::weak_ptr<TaskStack> stack;
+
     bool await_ready() const noexcept {
-        return false;
+        return schedule_on_other_ex(stack.lock());
     }
 
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<T> co) noexcept {
-        auto stack = co.promise().stack.lock();
-        rpc_assert(stack, Invariant{});
-        auto const frame = stack->pop();
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> co) noexcept {
         RPC_SCOPE_EXIT {
-            frame.co.destroy();
+            co.destroy();
         };
-        return resume(frame.ex, std::move(stack));
+        auto const stack = this->stack.lock();
+        rpc_assert(stack, Invariant{});
+        return stack->erased_top().co;
     }
 
     void await_resume() noexcept {
@@ -285,7 +289,10 @@ public:
         }
 
         auto final_suspend() noexcept {
-            return FinalAwaiter<promise_type>{};
+            auto stack = this->stack.lock();
+            rpc_assert(stack, Invariant{});
+            stack->pop();
+            return FinalAwaiter{std::move(stack)};
         }
     };
 
@@ -456,7 +463,7 @@ struct JoinHandle {
 
                 bool await_ready() const noexcept {
                     return !continuation.has_value()
-                        || schedule_on_other_ex(continuation->lock());
+                        || schedule_continuation_on_other_ex(continuation->lock());
                 }
 
                 std::coroutine_handle<> await_suspend(
@@ -782,7 +789,8 @@ public:
                         std::weak_ptr<TaskStack> continuation;
 
                         bool await_ready() const noexcept {
-                            return schedule_on_other_ex(this->continuation.lock());
+                            return schedule_continuation_on_other_ex(
+                                    this->continuation.lock());
                         }
 
                         std::coroutine_handle<> await_suspend(
