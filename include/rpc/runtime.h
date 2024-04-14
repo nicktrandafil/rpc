@@ -413,6 +413,15 @@ private:
     std::any result;
 };
 
+class TimedOut : public Error {
+public:
+    TimedOut() = default;
+
+    char const* what() const noexcept override {
+        return "timed out";
+    }
+};
+
 template <class T>
 struct JoinHandle {
     struct promise_type
@@ -563,7 +572,7 @@ struct JoinHandle {
         }
     }
 
-    Executor* executor;
+    Executor* executor; // todo get from the stack
     std::coroutine_handle<promise_type> co;
     std::weak_ptr<TaskStack> stack;
     std::shared_ptr<TaskStack> stack_guard;
@@ -749,7 +758,15 @@ private:
 template <class TaskT /*Coroutine Concept*/>
 class Timeout {
 public:
-    explicit Timeout(std::chrono::milliseconds, TaskT&& task) {
+    explicit Timeout(std::chrono::milliseconds duration, TaskT&& task) {
+    }
+
+    bool await_ready() noexcept {
+        return false;
+    }
+
+    template <class U>
+    void await_suspend(std::coroutine_handle<U> caller) {
         using T = typename TaskT::promise_type::ValueType;
 
         struct Stack {
@@ -780,7 +797,6 @@ public:
 
                 auto final_suspend() const noexcept {
                     struct Awaiter {
-                        std::shared_ptr<TaskStack> stack;
                         std::weak_ptr<TaskStack> continuation;
 
                         bool await_ready() const noexcept {
@@ -818,23 +834,42 @@ public:
             };
         };
 
-        // clang-format off
-        stack = [](auto task) -> Stack {
+        auto co = [](auto task) -> Stack {
             co_return co_await task;
-        }(std::move(task)).stack;
-        // clang-format on
+        }(std::move(task));
+
+        stack = co.stack;
+        co.promise().continuation = caller.promise().stack;
+        current_executor->spawn(this->dur, [stack = co.stack]() mutable {
+            std::weak_ptr weak = stack;
+            stack.reset();
+            cancel_and_execute(std::move(weak));
+        });
     }
 
-    bool await_ready() noexcept {
-        return false;
-    }
-
-    template <class T>
-    void await_suspend(std::coroutine_handle<T> caller) {
+    typename TaskT::promise_type::ValueType await_resume() noexcept(false) {
+        auto const stack = this->stack.lock();
+        if (!stack) {
+            throw TimedOut{};
+        }
+        return stack->template take_result<TaskT::promise_type::ValueType>();
     }
 
 private:
-    std::shared_ptr<TaskStack> stack;
+    static void cancel_and_execute(std::weak_ptr<TaskT> weak) {
+        if (auto stack = weak.lock()) {
+            current_executor->spawn([weak] {
+                cancel_and_execute(std::move(weak));
+            });
+        } else if (!schedule_on_other_ex(stack)) {
+            stack->erased_top().co.resume();
+        }
+    }
+
+private:
+    std::chrono::milliseconds dur;
+    TaskT task;
+    std::weak_ptr<TaskStack> stack;
 };
 
 } // namespace rpc
