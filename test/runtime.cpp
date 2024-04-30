@@ -165,34 +165,42 @@ TEST_CASE("abort already ready task does nothing",
     REQUIRE(!exception);
 }
 
-// todo: need multi-threaded executor for this
-// TEST_CASE("the task was already completed by the abort time",
-//           "[ThisThreadExecutor::spawn(Task<T>)]") {
-//     ThisThreadExecutor executor;
-//     bool run = false;
-//     bool exception = false;
-//     executor.block_on([&]() -> Task<void> {
-//         auto handle = executor.spawn([](bool& run) -> Task<void> {
-//             run = true;
-//             std::this_thread::sleep_for(2ms);
-//             co_return;
-//         }(run));
+TEST_CASE("the task was already completed by the abort time",
+          "[ThisThreadExecutor::spawn(Task<T>)]") {
+    ThisThreadExecutor executor;
+    bool run = false;
+    bool exception = false;
+    executor.block_on([&]() -> Task<void> {
+        // todo: avoid this when multi-threaded executor is supported
+        JoinHandle<void>* hack = nullptr;
+        JoinHandle<void> handle =
+                executor.spawn([](bool& run, auto const& hack) -> Task<void> {
+                    run = true;
 
-//         co_await Sleep{1ms};
-//         REQUIRE(handle.abort());
+                    co_await Sleep{2ms};
+                    rpc_assert(hack, Invariant{});
 
-//         try {
-//             co_await handle;
-//         } catch (Canceled const& x) {
-//             REQUIRE(x.was_already_completed());
-//             exception = true;
-//         }
+                    // at this point, we are practically complete
+                    REQUIRE(hack->abort());
 
-//         co_return;
-//     }());
-//     REQUIRE(run);
-//     REQUIRE(!exception);
-// }
+                    co_return;
+                }(run, hack));
+        hack = &handle;
+
+        co_await Sleep{1ms};
+
+        try {
+            co_await handle;
+        } catch (Canceled const& x) {
+            REQUIRE(x.was_already_completed());
+            exception = true;
+        }
+
+        co_return;
+    }());
+    REQUIRE(run);
+    REQUIRE(exception);
+}
 
 TEST_CASE("", "[ConditionalVariable]") {
     ThisThreadExecutor executor;
