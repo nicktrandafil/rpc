@@ -40,7 +40,7 @@ class TaskStack;
 struct Executor {
     virtual void spawn(std::function<void()>&& task) = 0;
     virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
-    virtual void remove_guard(TaskStack* x) noexcept = 0;
+    virtual bool remove_guard(TaskStack* x) noexcept = 0;
     virtual void add_guard(std::shared_ptr<TaskStack> x) noexcept(false) = 0;
     virtual void increment_work() = 0;
     virtual void decrement_work() = 0;
@@ -166,7 +166,7 @@ private:
 
 inline thread_local Executor* current_executor = nullptr;
 
-inline void schedule(std::shared_ptr<TaskStack> stack) {
+inline void schedule(std::shared_ptr<TaskStack>&& stack) {
     stack->erased_top().ex->spawn(
             [feature(stack = std::move(stack),
                      "Have both abort signal and ready result set in JoinHandle "
@@ -191,7 +191,7 @@ inline std::coroutine_handle<> resume(Executor* current_executor,
                  // immediately resume
                  ? stack->erased_top().co
                  // schedule
-                 : [stack = std::move(stack)]() -> std::coroutine_handle<> {
+                 : [stack = std::move(stack)]() mutable -> std::coroutine_handle<> {
         schedule(std::move(stack));
         return std::noop_coroutine();
     }();
@@ -467,7 +467,8 @@ struct JoinHandle {
 
                 bool await_ready() const noexcept {
                     return !continuation.has_value()
-                        || schedule_continuation_on_other_ex(continuation->lock());
+                        || /* we need to suspend only to continue on other executor*/
+                           schedule_continuation_on_other_ex(continuation->lock());
                 }
 
                 std::coroutine_handle<> await_suspend(
@@ -690,10 +691,12 @@ public:
         spawned_tasks.push_back(std::move(x));
     }
 
-    void remove_guard(TaskStack* x) noexcept override {
-        std::erase_if(spawned_tasks, [x](auto const& y) {
-            return y.get() == x;
-        });
+    bool remove_guard(TaskStack* x) noexcept override {
+        return std::erase_if(spawned_tasks,
+                             [x](auto const& y) {
+                                 return y.get() == x;
+                             })
+             > 0;
     }
 
 private:
@@ -758,7 +761,9 @@ private:
 template <class TaskT /*Coroutine Concept*/>
 class Timeout {
 public:
-    explicit Timeout(std::chrono::milliseconds duration, TaskT&& task) {
+    explicit Timeout(std::chrono::milliseconds duration, TaskT&& task) noexcept
+            : dur{duration}
+            , task{std::move(task)} {
     }
 
     bool await_ready() noexcept {
@@ -770,8 +775,6 @@ public:
         using T = typename TaskT::promise_type::ValueType;
 
         struct Stack {
-            std::shared_ptr<TaskStack> stack;
-
             struct promise_type
                     : BasePromise
                     , std::conditional_t<std::is_void_v<T>,
@@ -782,12 +785,11 @@ public:
                 std::weak_ptr<TaskStack> continuation;
 
                 Stack get_return_object() noexcept(false) {
-                    Stack ret{std::make_shared<TaskStack>()};
+                    Stack ret{std::make_shared<TaskStack>(),
+                              std::coroutine_handle<promise_type>::from_promise(*this)};
                     stack = ret.stack;
-                    ret.stack->push(TaskStack::ErasedFrame{
-                            .co = std::coroutine_handle<promise_type>::from_promise(
-                                    *this),
-                            .ex = current_executor});
+                    ret.stack->push(
+                            TaskStack::ErasedFrame{.co = ret.co, .ex = current_executor});
                     return ret;
                 }
 
@@ -800,8 +802,10 @@ public:
                         std::weak_ptr<TaskStack> continuation;
 
                         bool await_ready() const noexcept {
-                            return schedule_continuation_on_other_ex(
-                                    this->continuation.lock());
+                            return /* we need to suspend only to continue on other
+                                      executor*/
+                                    schedule_continuation_on_other_ex(
+                                            this->continuation.lock());
                         }
 
                         std::coroutine_handle<> await_suspend(
@@ -828,23 +832,34 @@ public:
                     rpc_assert(stack, Invariant{});
                     stack->pop();
                     rpc_assert(stack->size() == 0, Invariant{});
-
-                    return Awaiter{continuation};
+                    return current_executor->remove_guard(stack.get())
+                                 ? Awaiter{continuation}
+                                 : Awaiter{};
                 }
             };
+
+            std::shared_ptr<TaskStack> stack;
+            std::coroutine_handle<promise_type>
+                    co; // todo? is available as first frame in the stack
         };
 
-        auto co = [](auto task) -> Stack {
+        auto task_wrapper = [](auto task) -> Stack {
             co_return co_await task;
         }(std::move(task));
 
-        stack = co.stack;
-        co.promise().continuation = caller.promise().stack;
-        current_executor->spawn(this->dur, [stack = co.stack]() mutable {
-            std::weak_ptr weak = stack;
-            stack.reset();
-            cancel_and_execute(std::move(weak));
-        });
+        stack = task_wrapper.stack;
+        task_wrapper.co.promise().continuation = caller.promise().stack;
+        current_executor->add_guard(task_wrapper.stack);
+        current_executor->spawn(
+                [stack = std::weak_ptr{std::move(task_wrapper.stack)},
+                 continuation = caller.promise().stack,
+                 executor = current_executor]() mutable {
+                    if (auto const x = stack.lock();
+                        x && executor->remove_guard(x.get())) {
+                        cancel_and_continue(std::move(stack), std::move(continuation));
+                    }
+                },
+                this->dur);
     }
 
     typename TaskT::promise_type::ValueType await_resume() noexcept(false) {
@@ -852,17 +867,22 @@ public:
         if (!stack) {
             throw TimedOut{};
         }
-        return stack->template take_result<TaskT::promise_type::ValueType>();
+        return stack->template take_result<typename TaskT::promise_type::ValueType>();
     }
 
 private:
-    static void cancel_and_execute(std::weak_ptr<TaskT> weak) {
-        if (auto stack = weak.lock()) {
-            current_executor->spawn([weak] {
-                cancel_and_execute(std::move(weak));
+    static void cancel_and_continue(std::weak_ptr<TaskStack>&& stack,
+                                    std::weak_ptr<TaskStack>&& continuation) {
+        if (stack.lock()) {
+            current_executor->spawn([stack = std::move(stack),
+                                     continuation = std::move(continuation)]() mutable {
+                cancel_and_continue(std::move(stack), std::move(continuation));
             });
-        } else if (!schedule_on_other_ex(stack)) {
-            stack->erased_top().co.resume();
+        } else if (auto x = continuation.lock();
+                   x
+                   && !schedule_on_other_ex(
+                           /*not moved if not scheduled*/ std::move(x))) {
+            x->erased_top().co.resume();
         }
     }
 

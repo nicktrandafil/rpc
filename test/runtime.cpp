@@ -223,3 +223,64 @@ TEST_CASE("", "[ConditionalVariable]") {
     }());
     REQUIRE(counter == 2);
 }
+
+TEST_CASE("the coroutine is on time", "[Timeout]") {
+    ThisThreadExecutor executor;
+    int counter = 0;
+    executor.block_on([&]() -> Task<void> {
+        auto const x = co_await Timeout{2ms, []() -> Task<int> {
+                                            co_await Sleep{1ms};
+                                            co_return 1;
+                                        }()};
+        ++counter;
+        REQUIRE(x == 1);
+    }());
+    REQUIRE(counter == 1);
+}
+
+TEST_CASE("the coroutine is late", "[Timeout]") {
+    ThisThreadExecutor executor;
+    int math = 0;
+    executor.block_on([&]() -> Task<void> {
+        try {
+            co_await Timeout{1ms, []() -> Task<int> {
+                                 co_await Sleep{2ms};
+                                 co_return 1;
+                             }()};
+            math = 1;
+        } catch (TimedOut const&) {
+            math = 2;
+        }
+    }());
+    REQUIRE(math == 2);
+}
+
+TEST_CASE("void task, the coroutine is on time", "[Timeout]") {
+    ThisThreadExecutor executor;
+    int counter = 0;
+    executor.block_on([&]() -> Task<void> {
+        co_await Timeout{2ms, []() -> Task<void> {
+                             co_await Sleep{1ms};
+                             co_return;
+                         }()};
+        ++counter;
+    }());
+    REQUIRE(counter == 1);
+}
+
+TEST_CASE("void task, the coroutine is late", "[Timeout]") {
+    ThisThreadExecutor executor;
+    int math = 0;
+    executor.block_on([&]() -> Task<void> {
+        try {
+            co_await Timeout{1ms, []() -> Task<void> {
+                                 co_await Sleep{2ms};
+                                 co_return;
+                             }()};
+            math = 1;
+        } catch (TimedOut const&) {
+            math = 2;
+        }
+    }());
+    REQUIRE(math == 2);
+}
