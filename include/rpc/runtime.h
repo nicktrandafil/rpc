@@ -892,4 +892,136 @@ private:
     std::weak_ptr<TaskStack> stack;
 };
 
+template <class... TaskT /*Coroutine Concept*/>
+class WhenAll {
+public:
+    explicit WhenAll(TaskT&&... tasks) noexcept
+            : tasks{std::move(tasks)...} {
+    }
+
+    bool await_ready() noexcept {
+        return false;
+    }
+
+    template <class U>
+    void await_suspend(std::coroutine_handle<U> caller) {
+        using T = std::tuple<typename TaskT::promise_type::ValueType...>;
+
+        struct Stack {
+            struct promise_type
+                    : BasePromise
+                    , std::conditional_t<std::is_void_v<T>,
+                                         ReturnVoid<promise_type>,
+                                         ReturnValue<promise_type>> {
+                using ValueType [[maybe_unused]] = T;
+
+                std::weak_ptr<TaskStack> continuation;
+
+                Stack get_return_object() noexcept(false) {
+                    Stack ret{std::make_shared<TaskStack>(),
+                              std::coroutine_handle<promise_type>::from_promise(*this)};
+                    stack = ret.stack;
+                    ret.stack->push(
+                            TaskStack::ErasedFrame{.co = ret.co, .ex = current_executor});
+                    return ret;
+                }
+
+                std::suspend_never initial_suspend() const noexcept {
+                    return {};
+                }
+
+                auto final_suspend() const noexcept {
+                    struct Awaiter {
+                        std::weak_ptr<TaskStack> continuation;
+
+                        bool await_ready() const noexcept {
+                            return /* we need to suspend only to continue on other
+                                      executor*/
+                                    schedule_continuation_on_other_ex(
+                                            this->continuation.lock());
+                        }
+
+                        std::coroutine_handle<> await_suspend(
+                                std::coroutine_handle<promise_type> co) noexcept {
+                            RPC_SCOPE_EXIT {
+                                co.destroy();
+                            };
+
+                            // no continuation, do nothing
+                            auto continuation = this->continuation.lock();
+                            if (!continuation) {
+                                return std::noop_coroutine();
+                            }
+
+                            // resume immediately
+                            return continuation->erased_top().co;
+                        }
+
+                        void await_resume() noexcept {
+                        }
+                    };
+
+                    auto const stack = this->stack.lock();
+                    rpc_assert(stack, Invariant{});
+                    stack->pop();
+                    rpc_assert(stack->size() == 0, Invariant{});
+                    return current_executor->remove_guard(stack.get())
+                                 ? Awaiter{continuation}
+                                 : Awaiter{};
+                }
+            };
+
+            std::shared_ptr<TaskStack> stack;
+            std::coroutine_handle<promise_type>
+                    co; // todo? is available as first frame in the stack
+        };
+
+        auto task_wrapper = [](auto task) -> Stack {
+            co_return co_await task;
+        }(std::move(task));
+
+        stack = task_wrapper.stack;
+        task_wrapper.co.promise().continuation = caller.promise().stack;
+        current_executor->add_guard(task_wrapper.stack);
+        current_executor->spawn(
+                [stack = std::weak_ptr{std::move(task_wrapper.stack)},
+                 continuation = caller.promise().stack,
+                 executor = current_executor]() mutable {
+                    if (auto const x = stack.lock();
+                        x && executor->remove_guard(x.get())) {
+                        cancel_and_continue(std::move(stack), std::move(continuation));
+                    }
+                },
+                this->dur);
+    }
+
+    typename TaskT::promise_type::ValueType await_resume() noexcept(false) {
+        auto const stack = this->stack.lock();
+        if (!stack) {
+            throw TimedOut{};
+        }
+        return stack->template take_result<typename TaskT::promise_type::ValueType>();
+    }
+
+private:
+    static void cancel_and_continue(std::weak_ptr<TaskStack>&& stack,
+                                    std::weak_ptr<TaskStack>&& continuation) {
+        if (stack.lock()) {
+            current_executor->spawn([stack = std::move(stack),
+                                     continuation = std::move(continuation)]() mutable {
+                cancel_and_continue(std::move(stack), std::move(continuation));
+            });
+        } else if (auto x = continuation.lock();
+                   x
+                   && !schedule_on_other_ex(
+                           /*not moved if not scheduled*/ std::move(x))) {
+            x->erased_top().co.resume();
+        }
+    }
+
+private:
+    std::tuple<TaskT...> tasks;
+    std::weak_ptr<TaskStack> stack;
+};
+
 } // namespace rpc
