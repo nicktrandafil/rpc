@@ -240,19 +240,19 @@ TEST_CASE("the coroutine is on time", "[Timeout]") {
 
 TEST_CASE("the coroutine is late", "[Timeout]") {
     ThisThreadExecutor executor;
-    int math = 0;
+    int counter = 0;
     executor.block_on([&]() -> Task<void> {
         try {
             co_await Timeout{1ms, []() -> Task<int> {
                                  co_await Sleep{2ms};
                                  co_return 1;
                              }()};
-            math = 1;
+            counter = 1;
         } catch (TimedOut const&) {
-            math = 2;
+            counter = 2;
         }
     }());
-    REQUIRE(math == 2);
+    REQUIRE(counter == 2);
 }
 
 TEST_CASE("void task, the coroutine is on time", "[Timeout]") {
@@ -270,17 +270,91 @@ TEST_CASE("void task, the coroutine is on time", "[Timeout]") {
 
 TEST_CASE("void task, the coroutine is late", "[Timeout]") {
     ThisThreadExecutor executor;
-    int math = 0;
+    int counter = 0;
     executor.block_on([&]() -> Task<void> {
         try {
             co_await Timeout{1ms, []() -> Task<void> {
                                  co_await Sleep{2ms};
                                  co_return;
                              }()};
-            math = 1;
+            counter = 1;
         } catch (TimedOut const&) {
-            math = 2;
+            counter = 2;
         }
     }());
-    REQUIRE(math == 2);
+    REQUIRE(counter == 2);
+}
+
+TEST_CASE("one void task", "[WhenAll]") {
+    ThisThreadExecutor executor;
+    int counter = 0;
+    executor.block_on([&]() -> Task<void> {
+        auto const tmp = co_await WhenAll{[](auto& x) -> Task<void> {
+            x += 1;
+            co_return;
+        }(counter)};
+        counter += 2;
+        REQUIRE(tmp == std::tuple{Void<>{}});
+    }());
+    REQUIRE(counter == 3);
+}
+
+TEST_CASE("one int task", "[WhenAll]") {
+    ThisThreadExecutor executor;
+    int counter = 0;
+    executor.block_on([&]() -> Task<void> {
+        auto const tmp = co_await WhenAll{[](auto& x) -> Task<int> {
+            x += 1;
+            co_return 2;
+        }(counter)};
+        counter += 2;
+        REQUIRE(tmp == std::tuple{2});
+    }());
+    REQUIRE(counter == 3);
+}
+
+TEST_CASE("one int task and one void", "[WhenAll]") {
+    ThisThreadExecutor executor;
+    int counter1 = 0;
+    int counter2 = 0;
+    executor.block_on([&]() -> Task<void> {
+        auto const tmp = co_await WhenAll{[](auto& x) -> Task<int> {
+                                              x += 1;
+                                              co_return 2;
+                                          }(counter1),
+                                          [](auto& x) -> Task<void> {
+                                              x += 1;
+                                              co_return;
+                                          }(counter2)};
+        counter1 += 2;
+        REQUIRE(tmp == std::tuple{2, Void<>{}});
+    }());
+    REQUIRE(counter1 == 3);
+    REQUIRE(counter2 == 1);
+}
+
+TEST_CASE("one int task and one void with sleeps", "[WhenAll]") {
+    ThisThreadExecutor executor;
+    int counter1 = 0;
+    int counter2 = 0;
+    auto const start = std::chrono::steady_clock::now();
+    executor.block_on([&]() -> Task<void> {
+        auto const tmp = co_await WhenAll{[](auto& x) -> Task<int> {
+                                              co_await Sleep{1ms};
+                                              x += 1;
+                                              co_return 2;
+                                          }(counter1),
+                                          [](auto& x) -> Task<void> {
+                                              co_await Sleep{2ms};
+                                              x += 1;
+                                              co_return;
+                                          }(counter2)};
+        counter1 += 2;
+        REQUIRE(tmp == std::tuple{2, Void<>{}});
+    }());
+    REQUIRE(counter1 == 3);
+    REQUIRE(counter2 == 1);
+    auto const elapsed = std::chrono::steady_clock::now() - start;
+    REQUIRE(2ms < elapsed);
+    REQUIRE(elapsed < 3ms);
 }

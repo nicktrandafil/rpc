@@ -385,22 +385,21 @@ private:
 struct Error : std::exception {};
 
 template <class T = void>
-struct VoidFriendlyValue {
+struct Void {
     using WrapperT = T;
-    T inner;
-    static VoidFriendlyValue take(TaskStack& stack) noexcept(
-            std::is_nothrow_move_constructible_v<T>) {
-        return VoidFriendlyValue{stack.template take_result<T>()};
+    static T take(TaskStack& stack) noexcept(std::is_nothrow_move_constructible_v<T>) {
+        return stack.template take_result<T>();
     }
 };
 
 template <>
-struct VoidFriendlyValue<void> {
-    using WrapperT = VoidFriendlyValue<void>;
-    static VoidFriendlyValue take(TaskStack& stack) noexcept {
+struct Void<void> {
+    using WrapperT = Void<void>;
+    static Void take(TaskStack& stack) noexcept {
         stack.template take_result<void>();
-        return VoidFriendlyValue{};
+        return Void{};
     }
+    bool operator==(Void const&) const = default;
 };
 
 class Canceled : public Error {
@@ -408,7 +407,7 @@ public:
     Canceled() = default;
 
     template <class T>
-    explicit Canceled(/*not forwarding*/ VoidFriendlyValue<T>&& t) noexcept(false)
+    explicit Canceled(/*not forwarding*/ T&& t) noexcept(false)
             : result{std::move(t)} {
     }
 
@@ -416,10 +415,9 @@ public:
         return result.has_value();
     }
 
-    // todo: no need to return this
     template <class T>
-    VoidFriendlyValue<T> get_result() const noexcept(false) {
-        return std::any_cast<VoidFriendlyValue<T>>(result);
+    T get_result() const noexcept(false) {
+        return std::any_cast<T>(result);
     }
 
     char const* what() const noexcept override {
@@ -545,7 +543,7 @@ struct JoinHandle {
         }
 
         if (!stack_guard) {
-            throw Canceled{VoidFriendlyValue<T>::take(*stack)};
+            throw Canceled{Void<T>::take(*stack)};
         }
 
         this->stack_guard.reset();
@@ -901,6 +899,8 @@ private:
 template <class... TaskT /*Coroutine Concept*/>
 class WhenAll {
 public:
+    static_assert(sizeof...(TaskT) > 0);
+
     explicit WhenAll(TaskT&&... tasks) noexcept
             : tasks{std::move(tasks)...} {
     }
@@ -911,77 +911,7 @@ public:
 
     template <class U>
     void await_suspend(std::coroutine_handle<U> caller) {
-        using T = std::tuple<typename TaskT::promise_type::ValueType...>;
-
-        struct Stack {
-            struct promise_type
-                    : BasePromise
-                    , std::conditional_t<std::is_void_v<T>,
-                                         ReturnVoid<promise_type>,
-                                         ReturnValue<promise_type>> {
-                using ValueType [[maybe_unused]] = T;
-
-                std::weak_ptr<TaskStack> continuation;
-
-                Stack get_return_object() noexcept(false) {
-                    Stack ret{std::make_shared<TaskStack>(),
-                              std::coroutine_handle<promise_type>::from_promise(*this)};
-                    stack = ret.stack;
-                    ret.stack->push(
-                            TaskStack::ErasedFrame{.co = ret.co, .ex = current_executor});
-                    return ret;
-                }
-
-                std::suspend_always initial_suspend() const noexcept {
-                    return {};
-                }
-
-                auto final_suspend() const noexcept {
-                    struct Awaiter {
-                        std::weak_ptr<TaskStack> continuation;
-                        std::shared_ptr<TaskStack>
-                                continuation_locked; // todo: remove initialization
-
-                        bool await_ready() const noexcept {
-                            auto continuation = this->continuation.lock();
-                            if (!continuation
-                                || ++continuation->tasks_completed
-                                           < continuation->tasks_to_complete) {
-                                return true;
-                            }
-
-                            return schedule_on_other_ex(std::move(
-                                    this->continuation_locked = std::move(continuation)));
-                        }
-
-                        // todo: reuse
-                        std::coroutine_handle<> await_suspend(
-                                std::coroutine_handle<> co) noexcept {
-                            RPC_SCOPE_EXIT {
-                                co.destroy();
-                            };
-                            // todo:? maybe release
-                            return continuation_locked->erased_top().co;
-                        }
-
-                        void await_resume() noexcept {
-                        }
-                    };
-
-                    auto const stack = this->stack.lock();
-                    rpc_assert(stack, Invariant{});
-                    stack->pop();
-                    rpc_assert(stack->size() == 0, Invariant{});
-                    return Awaiter{continuation};
-                }
-            };
-
-            std::shared_ptr<TaskStack> stack;
-            std::coroutine_handle<promise_type>
-                    co; // todo:? is available as first frame in the stack
-        };
-
-        auto const continuation = caller.promise().stack.lock();
+        auto const continuation = caller.promise().stack;
 
         if (auto const x = continuation.lock()) {
             x->tasks_to_complete = sizeof...(TaskT);
@@ -989,10 +919,11 @@ public:
         }
 
         auto task_wrappers = std::apply(
-                [](auto&&... task) {
-                    return std::tuple{[](auto task) -> Stack {
-                        co_return co_await task;
-                    }(std::move(task))...};
+                []<typename... X>(X&&... task) {
+                    return std::tuple{
+                            [](auto task) -> Stack<typename X::promise_type::ValueType> {
+                                co_return co_await task;
+                            }(std::move(task))...};
                 },
                 std::move(tasks));
 
@@ -1008,20 +939,90 @@ public:
         std::apply(
                 [](auto const&... stack_wrapper) {
                     [](...) {
-                    }(stack_wrapper.co.resume()..., 0);
+                    }((stack_wrapper.co.resume(), 0)...);
                 },
                 task_wrappers);
     }
 
-    typename std::tuple<typename VoidFriendlyValue<
-            typename TaskT::promise_type::ValueType>::WrapperT...>
+    typename std::tuple<
+            typename Void<typename TaskT::promise_type::ValueType>::WrapperT...>
     await_resume() noexcept(false) {
         return [this]<size_t... Is>(std::index_sequence<Is...>) {
-            return std::tuple{VoidFriendlyValue<
-                    typename std::tuple_element_t<Is, std::tuple<TaskT...>>::
-                            promise_type::ValueType>::take(*stacks[Is])...};
+            return std::tuple{
+                    Void<typename std::tuple_element_t<Is, std::tuple<TaskT...>>::
+                                 promise_type::ValueType>::take(*stacks[Is])...};
         }(std::make_index_sequence<sizeof...(TaskT)>());
     }
+
+private:
+    template <class T>
+    struct Stack {
+        struct promise_type
+                : BasePromise
+                , std::conditional_t<std::is_void_v<T>,
+                                     ReturnVoid<promise_type>,
+                                     ReturnValue<promise_type>> {
+            using ValueType [[maybe_unused]] = T;
+
+            std::weak_ptr<TaskStack> continuation;
+
+            Stack get_return_object() noexcept(false) {
+                Stack ret{std::make_shared<TaskStack>(),
+                          std::coroutine_handle<promise_type>::from_promise(*this)};
+                stack = ret.stack;
+                ret.stack->push(
+                        TaskStack::ErasedFrame{.co = ret.co, .ex = current_executor});
+                return ret;
+            }
+
+            std::suspend_always initial_suspend() const noexcept {
+                return {};
+            }
+
+            auto final_suspend() noexcept {
+                struct Awaiter {
+                    std::weak_ptr<TaskStack> continuation;
+                    std::shared_ptr<TaskStack>
+                            continuation_locked{}; // todo: remove initialization
+
+                    bool await_ready() noexcept {
+                        auto continuation = this->continuation.lock();
+                        if (!continuation
+                            || ++continuation->tasks_completed
+                                       < continuation->tasks_to_complete) {
+                            return true;
+                        }
+
+                        return schedule_on_other_ex(
+                                std::move(continuation_locked = std::move(continuation)));
+                    }
+
+                    // todo: reuse
+                    std::coroutine_handle<> await_suspend(
+                            std::coroutine_handle<> co) noexcept {
+                        RPC_SCOPE_EXIT {
+                            co.destroy();
+                        };
+                        // todo:? maybe release
+                        return continuation_locked->erased_top().co;
+                    }
+
+                    void await_resume() noexcept {
+                    }
+                };
+
+                auto const stack = this->stack.lock();
+                rpc_assert(stack, Invariant{});
+                stack->pop();
+                rpc_assert(stack->size() == 0, Invariant{});
+                return Awaiter{continuation};
+            }
+        };
+
+        std::shared_ptr<TaskStack> stack;
+        std::coroutine_handle<promise_type>
+                co; // todo:? is available as first frame in the stack
+    };
 
 private:
     std::tuple<TaskT...> tasks;
