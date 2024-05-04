@@ -38,8 +38,9 @@ constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
 class TaskStack;
 
 struct Executor {
-    virtual void spawn(std::function<void()>&& task) = 0;
-    virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
+    virtual void spawn(/*todo: better function*/ std::function<void()>&& task) = 0;
+    virtual void spawn(/*todo better function*/ std::function<void()>&& task,
+                       std::chrono::milliseconds after) = 0;
     virtual bool remove_guard(TaskStack* x) noexcept = 0;
     virtual void add_guard(std::shared_ptr<TaskStack> x) noexcept(false) = 0;
     virtual void increment_work() = 0;
@@ -184,6 +185,7 @@ inline bool schedule_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
         && (schedule(std::move(stack)), true);
 }
 
+/// \post will not move if the `stack` is not scheduled
 inline bool schedule_continuation_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
     return !stack || schedule_on_other_ex(std::move(stack));
 }
@@ -479,12 +481,14 @@ struct JoinHandle {
         auto final_suspend() const noexcept {
             struct Awaiter {
                 std::optional<std::weak_ptr<TaskStack>> continuation;
-                // todo: store shared ptr to avoid double lock
+                std::shared_ptr<TaskStack>
+                        continuation_locked{}; // todo: remove initialization
 
-                bool await_ready() const noexcept {
+                bool await_ready() noexcept {
                     return !continuation.has_value()
                         || /* we need to suspend only to continue on other executor*/
-                           schedule_continuation_on_other_ex(continuation->lock());
+                           schedule_continuation_on_other_ex(
+                                   std::move(continuation_locked = continuation->lock()));
                 }
 
                 // todo: reuse
@@ -493,15 +497,8 @@ struct JoinHandle {
                     RPC_SCOPE_EXIT {
                         co.destroy();
                     };
-
-                    // no continuation, do nothing
-                    auto continuation = this->continuation.value().lock();
-                    if (!continuation) {
-                        return std::noop_coroutine();
-                    }
-
-                    // resume immediately
-                    return continuation->erased_top().co;
+                    // todo:? maybe release
+                    return continuation_locked->erased_top().co;
                 }
 
                 void await_resume() noexcept {
@@ -812,13 +809,14 @@ public:
                 auto final_suspend() const noexcept {
                     struct Awaiter {
                         std::weak_ptr<TaskStack> continuation;
-                        // todo: store locked shared ptr to avoid double lock
+                        std::shared_ptr<TaskStack>
+                                continuation_locked{}; // todo: remove initialization
 
-                        bool await_ready() const noexcept {
+                        bool await_ready() noexcept {
                             return /* we need to suspend only to continue on other
                                       executor*/
-                                    schedule_continuation_on_other_ex(
-                                            this->continuation.lock());
+                                    schedule_continuation_on_other_ex(std::move(
+                                            continuation_locked = continuation.lock()));
                         }
 
                         // todo: reuse
@@ -827,15 +825,8 @@ public:
                             RPC_SCOPE_EXIT {
                                 co.destroy();
                             };
-
-                            // no continuation, do nothing
-                            auto continuation = this->continuation.lock();
-                            if (!continuation) {
-                                return std::noop_coroutine();
-                            }
-
-                            // resume immediately
-                            return continuation->erased_top().co;
+                            // todo:? maybe release
+                            return continuation_locked->erased_top().co;
                         }
 
                         void await_resume() noexcept {
@@ -948,7 +939,8 @@ public:
                 auto final_suspend() const noexcept {
                     struct Awaiter {
                         std::weak_ptr<TaskStack> continuation;
-                        // todo: save shared_ptr to not lock it twice
+                        std::shared_ptr<TaskStack>
+                                continuation_locked; // todo: remove initialization
 
                         bool await_ready() const noexcept {
                             auto continuation = this->continuation.lock();
@@ -958,7 +950,8 @@ public:
                                 return true;
                             }
 
-                            return schedule_on_other_ex(std::move(continuation));
+                            return schedule_on_other_ex(std::move(
+                                    this->continuation_locked = std::move(continuation)));
                         }
 
                         // todo: reuse
@@ -967,15 +960,8 @@ public:
                             RPC_SCOPE_EXIT {
                                 co.destroy();
                             };
-
-                            // no continuation, do nothing
-                            auto continuation = this->continuation.lock();
-                            if (!continuation) {
-                                return std::noop_coroutine();
-                            }
-
-                            // resume immediately
-                            return continuation->erased_top().co;
+                            // todo:? maybe release
+                            return continuation_locked->erased_top().co;
                         }
 
                         void await_resume() noexcept {
