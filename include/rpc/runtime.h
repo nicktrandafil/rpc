@@ -98,7 +98,6 @@ public:
             if constexpr (std::is_void_v<T>) {
                 return;
             } else {
-                static_assert(std::is_nothrow_move_constructible_v<T>);
                 static_assert(std::is_nothrow_destructible_v<T>);
 
                 RPC_SCOPE_EXIT {
@@ -150,6 +149,9 @@ public:
         }
     }
 
+    unsigned tasks_to_complete = 0;
+    unsigned tasks_completed = 0;
+
 private:
     enum class Result {
         none,
@@ -175,6 +177,7 @@ inline void schedule(std::shared_ptr<TaskStack>&& stack) {
             });
 }
 
+/// \post will not move if the `stack` is not scheduled
 inline bool schedule_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
     rpc_assert(stack, Invariant{});
     return stack->erased_top().ex != current_executor
@@ -380,19 +383,30 @@ private:
 struct Error : std::exception {};
 
 template <class T = void>
-struct VoidFriendlyResult {
+struct VoidFriendlyValue {
+    using WrapperT = T;
     T inner;
+    static VoidFriendlyValue take(TaskStack& stack) noexcept(
+            std::is_nothrow_move_constructible_v<T>) {
+        return VoidFriendlyValue{stack.template take_result<T>()};
+    }
 };
 
 template <>
-struct VoidFriendlyResult<void> {};
+struct VoidFriendlyValue<void> {
+    using WrapperT = VoidFriendlyValue<void>;
+    static VoidFriendlyValue take(TaskStack& stack) noexcept {
+        stack.template take_result<void>();
+        return VoidFriendlyValue{};
+    }
+};
 
 class Canceled : public Error {
 public:
     Canceled() = default;
 
     template <class T>
-    explicit Canceled(/*not forwarding*/ VoidFriendlyResult<T>&& t) noexcept(false)
+    explicit Canceled(/*not forwarding*/ VoidFriendlyValue<T>&& t) noexcept(false)
             : result{std::move(t)} {
     }
 
@@ -400,9 +414,10 @@ public:
         return result.has_value();
     }
 
+    // todo: no need to return this
     template <class T>
-    VoidFriendlyResult<T> get_result() const noexcept(false) {
-        std::any_cast<VoidFriendlyResult<T>>(result);
+    VoidFriendlyValue<T> get_result() const noexcept(false) {
+        return std::any_cast<VoidFriendlyValue<T>>(result);
     }
 
     char const* what() const noexcept override {
@@ -464,6 +479,7 @@ struct JoinHandle {
         auto final_suspend() const noexcept {
             struct Awaiter {
                 std::optional<std::weak_ptr<TaskStack>> continuation;
+                // todo: store shared ptr to avoid double lock
 
                 bool await_ready() const noexcept {
                     return !continuation.has_value()
@@ -471,6 +487,7 @@ struct JoinHandle {
                            schedule_continuation_on_other_ex(continuation->lock());
                 }
 
+                // todo: reuse
                 std::coroutine_handle<> await_suspend(
                         std::coroutine_handle<promise_type> co) noexcept {
                     RPC_SCOPE_EXIT {
@@ -531,12 +548,7 @@ struct JoinHandle {
         }
 
         if (!stack_guard) {
-            if constexpr (std::is_same_v<T, void>) {
-                stack->template take_result<T>();
-                throw Canceled{VoidFriendlyResult{}};
-            } else {
-                throw Canceled{VoidFriendlyResult{stack->template take_result<T>()}};
-            }
+            throw Canceled{VoidFriendlyValue<T>::take(*stack)};
         }
 
         this->stack_guard.reset();
@@ -573,7 +585,7 @@ struct JoinHandle {
         }
     }
 
-    Executor* executor; // todo get from the stack
+    Executor* executor; // todo: get from the stack
     std::coroutine_handle<promise_type> co;
     std::weak_ptr<TaskStack> stack;
     std::shared_ptr<TaskStack> stack_guard;
@@ -793,13 +805,14 @@ public:
                     return ret;
                 }
 
-                std::suspend_never initial_suspend() const noexcept {
+                std::suspend_always initial_suspend() const noexcept {
                     return {};
                 }
 
                 auto final_suspend() const noexcept {
                     struct Awaiter {
                         std::weak_ptr<TaskStack> continuation;
+                        // todo: store locked shared ptr to avoid double lock
 
                         bool await_ready() const noexcept {
                             return /* we need to suspend only to continue on other
@@ -808,6 +821,7 @@ public:
                                             this->continuation.lock());
                         }
 
+                        // todo: reuse
                         std::coroutine_handle<> await_suspend(
                                 std::coroutine_handle<promise_type> co) noexcept {
                             RPC_SCOPE_EXIT {
@@ -840,14 +854,13 @@ public:
 
             std::shared_ptr<TaskStack> stack;
             std::coroutine_handle<promise_type>
-                    co; // todo? is available as first frame in the stack
+                    co; // todo:? is available as first frame in the stack
         };
 
         auto task_wrapper = [](auto task) -> Stack {
             co_return co_await task;
         }(std::move(task));
-
-        stack = task_wrapper.stack;
+        this->stack = task_wrapper.stack;
         task_wrapper.co.promise().continuation = caller.promise().stack;
         current_executor->add_guard(task_wrapper.stack);
         current_executor->spawn(
@@ -860,6 +873,8 @@ public:
                     }
                 },
                 this->dur);
+
+        task_wrapper.co.resume();
     }
 
     typename TaskT::promise_type::ValueType await_resume() noexcept(false) {
@@ -926,23 +941,29 @@ public:
                     return ret;
                 }
 
-                std::suspend_never initial_suspend() const noexcept {
+                std::suspend_always initial_suspend() const noexcept {
                     return {};
                 }
 
                 auto final_suspend() const noexcept {
                     struct Awaiter {
                         std::weak_ptr<TaskStack> continuation;
+                        // todo: save shared_ptr to not lock it twice
 
                         bool await_ready() const noexcept {
-                            return /* we need to suspend only to continue on other
-                                      executor*/
-                                    schedule_continuation_on_other_ex(
-                                            this->continuation.lock());
+                            auto continuation = this->continuation.lock();
+                            if (!continuation
+                                || ++continuation->tasks_completed
+                                           < continuation->tasks_to_complete) {
+                                return true;
+                            }
+
+                            return schedule_on_other_ex(std::move(continuation));
                         }
 
+                        // todo: reuse
                         std::coroutine_handle<> await_suspend(
-                                std::coroutine_handle<promise_type> co) noexcept {
+                                std::coroutine_handle<> co) noexcept {
                             RPC_SCOPE_EXIT {
                                 co.destroy();
                             };
@@ -965,63 +986,60 @@ public:
                     rpc_assert(stack, Invariant{});
                     stack->pop();
                     rpc_assert(stack->size() == 0, Invariant{});
-                    return current_executor->remove_guard(stack.get())
-                                 ? Awaiter{continuation}
-                                 : Awaiter{};
+                    return Awaiter{continuation};
                 }
             };
 
             std::shared_ptr<TaskStack> stack;
             std::coroutine_handle<promise_type>
-                    co; // todo? is available as first frame in the stack
+                    co; // todo:? is available as first frame in the stack
         };
 
-        auto task_wrapper = [](auto task) -> Stack {
-            co_return co_await task;
-        }(std::move(task));
+        auto const continuation = caller.promise().stack.lock();
 
-        stack = task_wrapper.stack;
-        task_wrapper.co.promise().continuation = caller.promise().stack;
-        current_executor->add_guard(task_wrapper.stack);
-        current_executor->spawn(
-                [stack = std::weak_ptr{std::move(task_wrapper.stack)},
-                 continuation = caller.promise().stack,
-                 executor = current_executor]() mutable {
-                    if (auto const x = stack.lock();
-                        x && executor->remove_guard(x.get())) {
-                        cancel_and_continue(std::move(stack), std::move(continuation));
-                    }
+        if (auto const x = continuation.lock()) {
+            x->tasks_to_complete = sizeof...(TaskT);
+            x->tasks_completed = 0;
+        }
+
+        auto task_wrappers = std::apply(
+                [](auto&&... task) {
+                    return std::tuple{[](auto task) -> Stack {
+                        co_return co_await task;
+                    }(std::move(task))...};
                 },
-                this->dur);
+                std::move(tasks));
+
+        this->stacks = std::apply(
+                [continuation](auto&... stack_wrapper) {
+                    return std::array{
+                            (stack_wrapper.co.promise().continuation = continuation,
+                             std::move(stack_wrapper.stack))...};
+                },
+                task_wrappers);
+
+        // todo:? iterate over `stacks` instread
+        std::apply(
+                [](auto const&... stack_wrapper) {
+                    [](...) {
+                    }(stack_wrapper.co.resume()..., 0);
+                },
+                task_wrappers);
     }
 
-    typename TaskT::promise_type::ValueType await_resume() noexcept(false) {
-        auto const stack = this->stack.lock();
-        if (!stack) {
-            throw TimedOut{};
-        }
-        return stack->template take_result<typename TaskT::promise_type::ValueType>();
-    }
-
-private:
-    static void cancel_and_continue(std::weak_ptr<TaskStack>&& stack,
-                                    std::weak_ptr<TaskStack>&& continuation) {
-        if (stack.lock()) {
-            current_executor->spawn([stack = std::move(stack),
-                                     continuation = std::move(continuation)]() mutable {
-                cancel_and_continue(std::move(stack), std::move(continuation));
-            });
-        } else if (auto x = continuation.lock();
-                   x
-                   && !schedule_on_other_ex(
-                           /*not moved if not scheduled*/ std::move(x))) {
-            x->erased_top().co.resume();
-        }
+    typename std::tuple<typename VoidFriendlyValue<
+            typename TaskT::promise_type::ValueType>::WrapperT...>
+    await_resume() noexcept(false) {
+        return [this]<size_t... Is>(std::index_sequence<Is...>) {
+            return std::tuple{VoidFriendlyValue<
+                    typename std::tuple_element_t<Is, std::tuple<TaskT...>>::
+                            promise_type::ValueType>::take(*stacks[Is])...};
+        }(std::make_index_sequence<sizeof...(TaskT)>());
     }
 
 private:
     std::tuple<TaskT...> tasks;
-    std::weak_ptr<TaskStack> stack;
+    std::array<std::shared_ptr<TaskStack>, sizeof...(TaskT)> stacks;
 };
 
 } // namespace rpc
