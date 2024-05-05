@@ -784,7 +784,7 @@ public:
     }
 
     template <class U>
-    void await_suspend(std::coroutine_handle<U> caller) {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<U> caller) {
         using T = typename TaskT::promise_type::ValueType;
 
         struct Stack {
@@ -869,7 +869,7 @@ public:
                 },
                 this->dur);
 
-        task_wrapper.co.resume();
+        return task_wrapper.co;
     }
 
     typename TaskT::promise_type::ValueType await_resume() noexcept(false) {
@@ -1011,6 +1011,7 @@ public:
                 task_wrappers);
 
         // todo:? iterate over `stacks` instread
+        // todo:? schedule
         std::apply(
                 [](auto const&... stack_wrapper) {
                     [](...) {
@@ -1069,7 +1070,7 @@ public:
                 });
 
         for (auto const& x : stacks) {
-            x->resume();
+            x->resume(); // todo:? schedule
         }
     }
 
