@@ -210,11 +210,18 @@ TEST_CASE("", "[ConditionalVariable]") {
 
         executor.spawn([](int* counter, ConditionalVariable* cv) -> Task<void> {
             auto const start = std::chrono::steady_clock::now();
+
             co_await cv->wait();
+
             auto const elapsed = std::chrono::steady_clock::now() - start;
+
             *counter += 2;
+
             REQUIRE(5ms < elapsed);
+#ifdef NDEBUG
             REQUIRE(elapsed < 6ms);
+#endif
+
             co_return;
         }(&counter, &cv));
 
@@ -352,9 +359,116 @@ TEST_CASE("one int task and one void with sleeps", "[WhenAll]") {
         counter1 += 2;
         REQUIRE(tmp == std::tuple{2, Void<>{}});
     }());
+    auto const elapsed = std::chrono::steady_clock::now() - start;
     REQUIRE(counter1 == 3);
     REQUIRE(counter2 == 1);
-    auto const elapsed = std::chrono::steady_clock::now() - start;
     REQUIRE(2ms < elapsed);
     REQUIRE(elapsed < 3ms);
+}
+
+TEST_CASE("check tasks execute simultaneously", "[WhenAll]") {
+    ThisThreadExecutor executor;
+    int counter = 2;
+    auto const start = std::chrono::steady_clock::now();
+    executor.block_on([&]() -> Task<void> {
+        co_await WhenAll{[](auto& x) -> Task<void> {
+                             co_await Sleep{2ms};
+                             x *= 2;
+                             co_await Sleep{2ms};
+                             x *= 4;
+                         }(counter),
+                         [](auto& x) -> Task<void> {
+                             co_await Sleep{2ms};
+                             x *= 3;
+                             co_await Sleep{2ms};
+                             x *= 5;
+                         }(counter)};
+    }());
+    auto const elapsed = std::chrono::steady_clock::now() - start;
+    REQUIRE(counter == 2 * (2 * 3) * (4 * 5));
+    REQUIRE(4ms < elapsed);
+#ifdef NDEBUG
+    REQUIRE(elapsed < 5ms);
+#endif
+}
+
+TEST_CASE("two voids with sleeps", "[WhenAllDyn]") {
+    ThisThreadExecutor executor;
+    int counter1 = 0;
+    int counter2 = 0;
+    auto const start = std::chrono::steady_clock::now();
+    executor.block_on([&]() -> Task<void> {
+        std::vector<Task<void>> tasks;
+
+        tasks.push_back([](auto& x) -> Task<void> {
+            co_await Sleep{1ms};
+            x += 1;
+            co_return;
+        }(counter1));
+
+        tasks.push_back([](auto& x) -> Task<void> {
+            co_await Sleep{2ms};
+            x += 1;
+            co_return;
+        }(counter2));
+
+        auto const tmp = co_await WhenAllDyn{std::move(tasks)};
+
+        counter1 += 2;
+        REQUIRE(tmp == std::vector{Void<>{}, Void<>{}});
+    }());
+    auto const elapsed = std::chrono::steady_clock::now() - start;
+    REQUIRE(counter1 == 3);
+    REQUIRE(counter2 == 1);
+    REQUIRE(2ms < elapsed);
+    REQUIRE(elapsed < 3ms);
+}
+
+TEST_CASE("an int", "[WhenAllDyn]") {
+    ThisThreadExecutor executor;
+    int counter = 0;
+    executor.block_on([&]() -> Task<void> {
+        std::vector<Task<int>> tasks;
+
+        tasks.push_back([]() -> Task<int> {
+            co_return 2;
+        }());
+
+        auto const tmp = co_await WhenAllDyn{std::move(tasks)};
+
+        counter += 1;
+        REQUIRE(tmp == std::vector{2});
+    }());
+    REQUIRE(counter == 1);
+}
+
+TEST_CASE("check tasks execute simultaneously", "[WhenAllDyn]") {
+    ThisThreadExecutor executor;
+    int counter = 2;
+    auto const start = std::chrono::steady_clock::now();
+    executor.block_on([&]() -> Task<void> {
+        std::vector<Task<void>> tasks;
+
+        tasks.push_back([](auto& x) -> Task<void> {
+            co_await Sleep{2ms};
+            x *= 2;
+            co_await Sleep{2ms};
+            x *= 4;
+        }(counter));
+
+        tasks.push_back([](auto& x) -> Task<void> {
+            co_await Sleep{2ms};
+            x *= 3;
+            co_await Sleep{2ms};
+            x *= 5;
+        }(counter));
+
+        co_await WhenAllDyn{std::move(tasks)};
+    }());
+    auto const elapsed = std::chrono::steady_clock::now() - start;
+    REQUIRE(counter == 2 * (2 * 3) * (4 * 5));
+    REQUIRE(4ms < elapsed);
+#ifdef NDEBUG
+    REQUIRE(elapsed < 5ms);
+#endif
 }
