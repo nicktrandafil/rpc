@@ -150,11 +150,6 @@ public:
         }
     }
 
-    void resume() const noexcept(false) {
-        rpc_assert(size() > 0, rpc::Invariant{});
-        erased_top().co.resume();
-    }
-
     unsigned tasks_to_complete = 0;
     unsigned tasks_completed = 0;
 
@@ -984,7 +979,7 @@ public:
     }
 
     template <class U>
-    void await_suspend(std::coroutine_handle<U> caller) {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<U> caller) {
         auto const continuation = caller.promise().stack;
 
         if (auto const x = continuation.lock()) {
@@ -992,6 +987,7 @@ public:
             x->tasks_completed = 0;
         }
 
+        // create stacks
         auto task_wrappers = std::apply(
                 []<typename... X>(X&&... task) {
                     return std::tuple{
@@ -1002,22 +998,25 @@ public:
                 },
                 std::move(tasks));
 
+        // set continuation
         this->stacks = std::apply(
                 [continuation](auto&... stack_wrapper) {
                     return std::array{
                             (stack_wrapper.co.promise().continuation = continuation,
-                             std::move(stack_wrapper.stack))...};
+                             stack_wrapper.stack)...};
                 },
                 task_wrappers);
 
-        // todo:? iterate over `stacks` instread
-        // todo:? schedule
-        std::apply(
-                [](auto const&... stack_wrapper) {
+        return std::apply(
+                [](auto const& first, auto&&... other) {
+                    // schedule
                     [](...) {
-                    }((stack_wrapper.co.resume(), 0)...);
+                    }((schedule(std::move(other.stack)), 0)...);
+
+                    // resume imeediately
+                    return first.co;
                 },
-                task_wrappers);
+                std::move(task_wrappers));
     }
 
     typename std::tuple<
@@ -1047,7 +1046,8 @@ public:
     }
 
     template <class U>
-    void await_suspend(std::coroutine_handle<U> caller) noexcept(false) {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<U> caller) noexcept(
+            false) {
         auto const continuation = caller.promise().stack;
 
         if (auto const x = continuation.lock()) {
@@ -1069,9 +1069,11 @@ public:
                     return std::move(ret.stack);
                 });
 
-        for (auto const& x : stacks) {
-            x->resume(); // todo:? schedule
+        for (unsigned i = 1; i < stacks.size(); ++i) {
+            schedule(std::shared_ptr(stacks[i]));
         }
+
+        return stacks[0]->erased_top().co;
     }
 
     std::vector<typename Void<typename TaskT::promise_type::ValueType>::WrapperT>
