@@ -236,6 +236,19 @@ TEST_CASE("the coroutine is on time", "[Timeout]") {
     int counter = 0;
     executor.block_on([&]() -> Task<void> {
         auto const x = co_await Timeout{2ms, []() -> Task<int> {
+                                            co_return 1;
+                                        }()};
+        ++counter;
+        REQUIRE(x == 1);
+    }());
+    REQUIRE(counter == 1);
+}
+
+TEST_CASE("the coroutine is on time with some sleep", "[Timeout]") {
+    ThisThreadExecutor executor;
+    int counter = 0;
+    executor.block_on([&]() -> Task<void> {
+        auto const x = co_await Timeout{2ms, []() -> Task<int> {
                                             co_await Sleep{1ms};
                                             co_return 1;
                                         }()};
@@ -471,4 +484,17 @@ TEST_CASE("check tasks execute simultaneously", "[WhenAllDyn]") {
 #ifdef NDEBUG
     REQUIRE(elapsed < 5ms);
 #endif
+}
+
+TEST_CASE("one int task", "[WhenAny]") {
+    ThisThreadExecutor executor;
+    int counter = 0;
+    executor.block_on([&]() -> Task<void> {
+        auto const tmp = co_await WhenAny{[]() -> Task<int> {
+            co_return 1;
+        }()};
+        counter = 2;
+        REQUIRE(tmp == std::variant<int>{1});
+    }());
+    REQUIRE(counter == 2);
 }

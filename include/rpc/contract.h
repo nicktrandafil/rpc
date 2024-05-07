@@ -48,10 +48,8 @@ struct Invariant {
 };
 
 #define rpc_assert(expr, module)                                                         \
-    if (!(expr)) {                                                                       \
-        module.failed(std::source_location::current());                                  \
-    }                                                                                    \
-    static_assert(true)
+    static_cast<void>((expr) || (module.failed(std::source_location::current()), true),  \
+                      AnyExpr{})
 
 struct AnyExpr {
     template <class T>
