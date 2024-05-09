@@ -498,3 +498,88 @@ TEST_CASE("one int task", "[WhenAny]") {
     }());
     REQUIRE(counter == 2);
 }
+
+TEST_CASE("one void task", "[WhenAny]") {
+    ThisThreadExecutor executor;
+    int counter = 0;
+    executor.block_on([&]() -> Task<void> {
+        auto const tmp = co_await WhenAny{[]() -> Task<void> {
+            co_return;
+        }()};
+        counter = 2;
+        REQUIRE(tmp == std::variant<Void<>>{});
+    }());
+    REQUIRE(counter == 2);
+}
+
+TEST_CASE("one void task, one int which should be canceled", "[WhenAny]") {
+    ThisThreadExecutor executor;
+    int counter = 1;
+    executor.block_on([&]() -> Task<void> {
+        auto const tmp = co_await WhenAny{[]() -> Task<void> {
+                                              co_return;
+                                          }(),
+                                          [](auto& counter) -> Task<int> {
+                                              co_await Sleep{1ms};
+                                              counter += 1;
+                                              co_return 1;
+                                          }(counter)};
+        counter *= 2;
+        REQUIRE(tmp == std::variant<Void<>, int>{Void<>{}});
+    }());
+    REQUIRE(counter == 2);
+}
+
+TEST_CASE("one void", "[WhenAnyDyn]") {
+    ThisThreadExecutor executor;
+    int counter = 1;
+    executor.block_on([&]() -> Task<void> {
+        std::vector<Task<void>> tasks;
+        tasks.push_back([]() -> Task<void> {
+            co_return;
+        }());
+        auto const tmp = co_await WhenAnyDyn{std::move(tasks)};
+        counter = 2;
+        REQUIRE(tmp == Void<>{});
+    }());
+    REQUIRE(counter == 2);
+}
+
+TEST_CASE("one int", "[WhenAnyDyn]") {
+    ThisThreadExecutor executor;
+    int counter = 1;
+    executor.block_on([&]() -> Task<void> {
+        std::vector<Task<int>> tasks;
+        tasks.push_back([]() -> Task<int> {
+            co_return 3;
+        }());
+        auto const tmp = co_await WhenAnyDyn{std::move(tasks)};
+        counter = 2;
+        REQUIRE(tmp == 3);
+    }());
+    REQUIRE(counter == 2);
+}
+
+TEST_CASE("one canceled", "[WhenAnyDyn]") {
+    ThisThreadExecutor executor;
+    int counter = 1;
+    executor.block_on([&]() -> Task<void> {
+        std::vector<Task<int>> tasks;
+
+        tasks.push_back([]() -> Task<int> {
+            co_await Sleep{1ms};
+            co_return 1;
+        }());
+
+        tasks.push_back([](auto& counter) -> Task<int> {
+            co_await Sleep{2ms};
+            counter += 1;
+            co_return 2;
+        }(counter));
+
+        auto const tmp = co_await WhenAnyDyn{std::move(tasks)};
+        counter *= 2;
+        REQUIRE(tmp == 1);
+    }());
+    REQUIRE(counter == 2);
+}

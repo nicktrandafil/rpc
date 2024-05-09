@@ -3,8 +3,6 @@
 #include "contract.h"
 #include "scope_exit.h"
 
-#include <sys/epoll.h>
-
 #include <any>
 #include <coroutine>
 #include <cstdio>
@@ -15,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <ranges>
 #include <stack>
 #include <thread>
 #include <type_traits>
@@ -1268,6 +1267,70 @@ private:
     std::tuple<TaskT...> tasks;
     std::weak_ptr<TaskStack> continuation;
     std::array<std::weak_ptr<TaskStack>, sizeof...(TaskT)> stacks;
+};
+
+template <class TaskT /*Coroutine Concept*/>
+class WhenAnyDyn {
+public:
+    explicit WhenAnyDyn(std::vector<TaskT>&& tasks) noexcept
+            : tasks{std::move(tasks)} {
+    }
+
+    bool await_ready() noexcept {
+        return false;
+    }
+
+    template <class U>
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<U> caller) {
+        continuation = caller.promise().stack;
+
+        if (auto const x = continuation.lock()) {
+            x->tasks_to_complete = x->completed_task_index = this->tasks.size();
+        }
+
+        std::vector<std::shared_ptr<TaskStack>> stacks(tasks.size());
+        std::transform(
+                std::make_move_iterator(begin(tasks)),
+                std::make_move_iterator(end(tasks)),
+                begin(stacks),
+                [this, i = size_t(0)](TaskT&& task) mutable {
+                    auto ret = [](auto task)
+                            -> WhenAnyStack<typename TaskT::promise_type::ValueType> {
+                        co_return co_await task;
+                    }(std::move(task));
+                    ret.co.promise().continuation = continuation;
+                    ret.co.promise().index = i++;
+                    return std::move(ret.stack);
+                });
+
+        this->stacks.resize(stacks.size());
+        std::transform(
+                begin(stacks), end(stacks), begin(this->stacks), [](auto const& x) {
+                    return std::weak_ptr{x};
+                });
+
+        current_executor->add_guard_group(stacks);
+
+        for (unsigned i = 1; i < stacks.size(); ++i) {
+            schedule(std::shared_ptr(stacks[i]));
+        }
+
+        return stacks[0]->erased_top().co;
+    }
+
+    using ReturnType = typename Void<typename TaskT::promise_type::ValueType>::WrapperT;
+
+    ReturnType await_resume() noexcept(false) {
+        auto const continuation = this->continuation.lock();
+        rpc_assert(continuation, Invariant{});
+        return Void<typename TaskT::promise_type::ValueType>::take(
+                *stacks[continuation->completed_task_index].lock());
+    }
+
+private:
+    std::vector<TaskT> tasks;
+    std::weak_ptr<TaskStack> continuation;
+    std::vector<std::weak_ptr<TaskStack>> stacks;
 };
 
 } // namespace rpc
