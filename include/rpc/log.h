@@ -2,6 +2,6 @@
 
 namespace rpc {
 
-#define RPC_LOG_ERROR(...) static_assert(true)
+#define rpc_log_error(...) static_assert(true)
 
 } // namespace rpc

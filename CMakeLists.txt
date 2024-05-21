@@ -34,6 +34,13 @@ find_package(Catch2 REQUIRED QUIET)
 target_link_libraries(test_rpc PRIVATE rpc Catch2::Catch2WithMain)
 set_target_build_settings(test_rpc)
 
+add_executable(bench_tasks_in_single_thrad
+    bench/tasks_in_single_thread.cpp
+)
+find_package(Boost REQUIRED COMPONENTS system)
+target_link_libraries(bench_tasks_in_single_thrad PRIVATE rpc Boost::boost Boost::system)
+set_target_build_settings(bench_tasks_in_single_thrad)
+
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES ${CMAKE_BINARY_DIR}/dcov "${CMAKE_BINARY_DIR}/cov.sh")
     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/cov.sh

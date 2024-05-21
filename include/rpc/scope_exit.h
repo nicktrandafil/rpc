@@ -13,7 +13,7 @@ struct ScopeExit : Fn {
         try {
             (*this)();
         } catch (...) {
-            RPC_LOG_ERROR("exception durring scope exit");
+            rpc_log_error("exception durring scope exit");
         }
     }
 };
@@ -32,7 +32,7 @@ struct ScopeFail : Fn {
             try {
                 (*this)();
             } catch (...) {
-                RPC_LOG_ERROR("exception during scope fail");
+                rpc_log_error("exception during scope fail");
             }
         }
     }

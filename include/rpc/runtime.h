@@ -871,8 +871,8 @@ public:
                     auto continuation = this->continuation.lock();
                     return (continuation && current_executor->remove_guard(stack.get()))
                                  ? Awaiter{std::move(
-                                         (continuation->guard = std::move(stack),
-                                          continuation))}
+                                           (continuation->guard = std::move(stack),
+                                            continuation))}
                                  : Awaiter{};
                 }
             };

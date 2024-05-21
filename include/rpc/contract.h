@@ -48,10 +48,11 @@ struct Invariant {
 };
 
 #define rpc_assert(expr, module)                                                         \
-    static_cast<void>((expr) || (module.failed(std::source_location::current()), true),  \
-                      AnyExpr{})
+    ((expr) || (module.failed(std::source_location::current()), true), AnyExpr{})
 
 struct AnyExpr {
+    [[maybe_unused]] AnyExpr() noexcept = default;
+
     template <class T>
     [[maybe_unused]] [[noreturn]] operator T&() const noexcept {
         std::abort();
