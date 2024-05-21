@@ -24,6 +24,7 @@ option(RPC_ABORT_ON_TODO "Abort on rpc_todo" OFF)
 if(RPC_ABORT_ON_TODO)
     target_compile_definitions(rpc INTERFACE RPC_ABORT_ON_TODO)
 endif()
+option(RPC_WARNINGS_ARE_ERRORS "Warnings are errors" ON)
 
 add_executable(test_rpc 
     test/mpsc.cpp
@@ -32,14 +33,14 @@ add_executable(test_rpc
 )
 find_package(Catch2 REQUIRED QUIET)
 target_link_libraries(test_rpc PRIVATE rpc Catch2::Catch2WithMain)
-set_target_build_settings(test_rpc)
+set_target_build_settings(test_rpc WARNINGS_ARE_ERRORS ${RPC_WARNINGS_ARE_ERRORS})
 
 add_executable(bench_tasks_in_single_thrad
     bench/tasks_in_single_thread.cpp
 )
 find_package(Boost REQUIRED COMPONENTS system)
 target_link_libraries(bench_tasks_in_single_thrad PRIVATE rpc Boost::boost Boost::system)
-set_target_build_settings(bench_tasks_in_single_thrad)
+set_target_build_settings(bench_tasks_in_single_thrad WARNINGS_ARE_ERRORS ${RPC_WARNINGS_ARE_ERRORS})
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES ${CMAKE_BINARY_DIR}/dcov "${CMAKE_BINARY_DIR}/cov.sh")
