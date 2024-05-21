@@ -13,8 +13,7 @@ static unsigned global = 0;
 static rpc::Task<void> my_co_main() {
     std::vector<rpc::JoinHandle<void>> tasks;
     for (unsigned i = 0; i < 10000; ++i) {
-        auto e = static_cast<rpc::ThisThreadExecutor*>(rpc::current_executor);
-        tasks.push_back(e->spawn([](unsigned i) -> rpc::Task<void> {
+        tasks.push_back(rpc::spawn([](unsigned i) -> rpc::Task<void> {
             co_await rpc::Sleep{1ms};
             global += i;
             co_return;
@@ -39,8 +38,7 @@ static boost::asio::awaitable<void> my_co_main2() {
 
 static rpc::Task<void> my_co_main3() {
     for (unsigned i = 0; i < 10000; ++i) {
-        auto e = static_cast<rpc::ThisThreadExecutor*>(rpc::current_executor);
-        e->spawn([](unsigned i) -> rpc::Task<void> {
+        rpc::spawn([](unsigned i) -> rpc::Task<void> {
             co_await rpc::Sleep{1ms};
             global += i;
             co_return;

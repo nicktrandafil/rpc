@@ -65,7 +65,7 @@ TEST_CASE("destruction order should be natural",
 TEST_CASE("await for result", "[ThisThreadExecutor::spawn(Task<T>)]") {
     ThisThreadExecutor executor;
     executor.block_on([&]() -> Task<void> {
-        auto x = co_await executor.spawn([]() -> Task<int> {
+        auto x = co_await spawn([]() -> Task<int> {
             co_return 1 + 1;
         }());
         REQUIRE(x == 2);
@@ -89,7 +89,7 @@ TEST_CASE("ignore result", "[ThisThreadExecutor::spawn(Task<T>)]") {
     ThisThreadExecutor executor;
     bool run = false;
     executor.block_on([&]() -> Task<void> {
-        executor.spawn([&]() -> Task<int> {
+        spawn([&]() -> Task<int> {
             run = true;
             co_return 1 + 1;
         }());
@@ -103,7 +103,7 @@ TEST_CASE("use some sleep to actually enter the block_on loop",
     ThisThreadExecutor executor;
     bool run = false;
     executor.block_on([&]() -> Task<void> {
-        executor.spawn([](bool& run) -> Task<int> {
+        spawn([](bool& run) -> Task<int> {
             co_await Sleep{5ms};
             run = true;
             co_return 1 + 1;
@@ -118,7 +118,7 @@ TEST_CASE("abort", "[ThisThreadExecutor::spawn(Task<T>)]") {
     bool run = false;
     bool exception = false;
     executor.block_on([&]() -> Task<void> {
-        auto handle = executor.spawn([](bool& run) -> Task<void> {
+        auto handle = spawn([](bool& run) -> Task<void> {
             co_await Sleep{5ms};
             run = true;
             co_return;
@@ -145,7 +145,7 @@ TEST_CASE("abort already ready task does nothing",
     bool run = false;
     bool exception = false;
     executor.block_on([&]() -> Task<void> {
-        auto handle = executor.spawn([](bool& run) -> Task<void> {
+        auto handle = spawn([](bool& run) -> Task<void> {
             run = true;
             co_return;
         }(run));
@@ -173,18 +173,17 @@ TEST_CASE("the task was already completed by the abort time",
     executor.block_on([&]() -> Task<void> {
         // todo: avoid this when multi-threaded executor is supported
         JoinHandle<void>* hack = nullptr;
-        JoinHandle<void> handle =
-                executor.spawn([](bool& run, auto const& hack) -> Task<void> {
-                    run = true;
+        JoinHandle<void> handle = spawn([](bool& run, auto const& hack) -> Task<void> {
+            run = true;
 
-                    co_await Sleep{2ms};
-                    rpc_assert(hack, Invariant{});
+            co_await Sleep{2ms};
+            rpc_assert(hack, Invariant{});
 
-                    // at this point, we are practically complete
-                    REQUIRE(hack->abort());
+            // at this point, we are practically complete
+            REQUIRE(hack->abort());
 
-                    co_return;
-                }(run, hack));
+            co_return;
+        }(run, hack));
         hack = &handle;
 
         co_await Sleep{1ms};
@@ -208,7 +207,7 @@ TEST_CASE("", "[ConditionalVariable]") {
     executor.block_on([&]() -> Task<void> {
         ConditionalVariable cv;
 
-        executor.spawn([](int* counter, ConditionalVariable* cv) -> Task<void> {
+        spawn([](int* counter, ConditionalVariable* cv) -> Task<void> {
             auto const start = std::chrono::steady_clock::now();
 
             co_await cv->wait();

@@ -713,16 +713,6 @@ public:
         return t.stack->template take_result<T>();
     }
 
-    template <class T>
-    JoinHandle<T> spawn(Task<T>&& task) {
-        current_executor = this;
-        auto stack = std::make_shared<TaskStack>();
-        auto t = [&](Task<T> task, std::weak_ptr<TaskStack>) -> JoinHandle<T> {
-            co_return co_await task;
-        }(std::move(task), stack);
-        return t;
-    }
-
     void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) override {
         spawned_tasks.emplace(std::move(x));
     }
@@ -1369,5 +1359,14 @@ private:
     std::weak_ptr<TaskStack> continuation;
     std::vector<std::weak_ptr<TaskStack>> stacks;
 };
+
+template <class T>
+inline JoinHandle<T> spawn(Task<T>&& task) noexcept(false) {
+    auto stack = std::make_shared<TaskStack>();
+    auto t = [&](Task<T> task, std::weak_ptr<TaskStack>) -> JoinHandle<T> {
+        co_return co_await task;
+    }(std::move(task), stack);
+    return t;
+}
 
 } // namespace rpc

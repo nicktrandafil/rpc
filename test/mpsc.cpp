@@ -27,7 +27,7 @@ TEST_CASE("construct and send many values, conditional variable isn't really inv
     ThisThreadExecutor executor;
     int counter = 0;
     executor.block_on([&]() -> Task<void> {
-        executor.spawn([tx = std::move(tx)]() -> Task<void> {
+        spawn([tx = std::move(tx)]() -> Task<void> {
             for (int i = 0; i < 10; ++i) {
                 tx.send(i);
             }
@@ -53,7 +53,7 @@ TEST_CASE("construct and send many values, conditional variable is involved", "[
     int counter = 0;
     auto const start = std::chrono::steady_clock::now();
     executor.block_on([&]() -> Task<void> {
-        executor.spawn([](auto tx, auto delay) -> Task<void> {
+        spawn([](auto tx, auto delay) -> Task<void> {
             for (int i = 0; i < n; ++i) {
                 co_await Sleep{delay};
                 tx.send(i);
