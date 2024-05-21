@@ -37,8 +37,19 @@ static boost::asio::awaitable<void> my_co_main2() {
     }
 }
 
+static rpc::Task<void> my_co_main3() {
+    for (unsigned i = 0; i < 10000; ++i) {
+        auto e = static_cast<rpc::ThisThreadExecutor*>(rpc::current_executor);
+        e->spawn([](unsigned i) -> rpc::Task<void> {
+            co_await rpc::Sleep{1ms};
+            global += i;
+            co_return;
+        }(i));
+    }
+    co_return;
+}
+
 int main() {
-    std::cout << "------------------\n";
     {
         std::cout << "my coro\n";
         rpc::ThisThreadExecutor exec;
@@ -52,6 +63,7 @@ int main() {
                   << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
                   << "\n";
     }
+
     std::cout << "------------------\n";
 
     global = 0;
@@ -63,6 +75,24 @@ int main() {
 
         auto const start = std::chrono::steady_clock::now();
         io.run();
+        auto const end = std::chrono::steady_clock::now();
+
+        std::cout << "result: " << global << "\n";
+        std::cout << "elapsed: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+                  << "\n";
+    }
+
+    std::cout << "------------------\n";
+
+    global = 0;
+
+    {
+        std::cout << "my coro 3\n";
+        rpc::ThisThreadExecutor exec;
+
+        auto const start = std::chrono::steady_clock::now();
+        exec.block_on(my_co_main3());
         auto const end = std::chrono::steady_clock::now();
 
         std::cout << "result: " << global << "\n";

@@ -17,12 +17,15 @@
 #include <stack>
 #include <thread>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
 
 // hypothesis:
 // * a coroutine can have at most two references to it
+
+// todo: std::function with non trivial function object allocates, try to avoid this
 
 #define rpc_print(...) std::format_to(std::ostreambuf_iterator{std::cout}, __VA_ARGS__)
 
@@ -37,11 +40,10 @@ constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
 class TaskStack;
 
 struct Executor {
-    virtual void spawn(/*todo: better function*/ std::function<void()>&& task) = 0;
-    virtual void spawn(/*todo better function*/ std::function<void()>&& task,
-                       std::chrono::milliseconds after) = 0;
+    virtual void spawn(std::function<void()>&& task) = 0;
+    virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
     virtual bool remove_guard(TaskStack* x) noexcept = 0;
-    virtual void add_guard(std::shared_ptr<TaskStack> x) noexcept(false) = 0;
+    virtual void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) = 0;
     virtual void add_guard_group(std::vector<std::shared_ptr<TaskStack>> x) noexcept(
             false) = 0;
     virtual bool remove_guard_group(TaskStack* x) noexcept = 0;
@@ -172,7 +174,7 @@ private:
         value,
     } result_index = Result::none;
     std::exception_ptr result_exception;
-    std::aligned_storage_t<10_KB, alignof(std::max_align_t)> result_value;
+    std::aligned_storage_t<24, alignof(std::max_align_t)> result_value;
     void (*destroy_value)(void*) = nullptr;
 
     std::stack<ErasedFrame, std::vector<ErasedFrame>>
@@ -215,17 +217,16 @@ inline std::coroutine_handle<> resume(Executor* current_executor,
 }
 
 struct FinalAwaiter {
-    std::weak_ptr<TaskStack> stack;
+    std::shared_ptr<TaskStack> stack;
 
-    bool await_ready() const noexcept {
-        return schedule_on_other_ex(stack.lock());
+    bool await_ready() noexcept {
+        return schedule_on_other_ex(std::move(stack));
     }
 
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> co) noexcept {
         RPC_SCOPE_EXIT {
             co.destroy();
         };
-        auto const stack = this->stack.lock();
         rpc_assert(stack, Invariant{});
         return stack->erased_top().co;
     }
@@ -504,15 +505,12 @@ struct JoinHandle {
 
         auto final_suspend() const noexcept {
             struct Awaiter {
-                std::optional<std::weak_ptr<TaskStack>> continuation;
-                std::shared_ptr<TaskStack>
-                        continuation_locked{}; // todo: remove initialization
+                std::optional<std::shared_ptr<TaskStack>> continuation;
 
                 bool await_ready() noexcept {
                     return !continuation.has_value()
                         || /* we need to suspend only to continue on other executor*/
-                           schedule_continuation_on_other_ex(
-                                   std::move(continuation_locked = continuation->lock()));
+                           schedule_on_other_ex(std::move(*continuation));
                 }
 
                 // todo: reuse
@@ -522,7 +520,7 @@ struct JoinHandle {
                         co.destroy();
                     };
                     // todo:? maybe release
-                    return continuation_locked->erased_top().co;
+                    return (*continuation)->erased_top().co;
                 }
 
                 void await_resume() noexcept {
@@ -536,7 +534,13 @@ struct JoinHandle {
                     "Have both abort signal and ready result set in JoinHandle in case "
                     "of a race condition");
 
-            return Awaiter{continuation};
+            if (!continuation.has_value()) {
+                return Awaiter{};
+            } else if (auto continuation = this->continuation->lock()) {
+                return Awaiter{std::move(continuation)};
+            } else {
+                return Awaiter{};
+            }
         }
     };
 
@@ -593,7 +597,7 @@ struct JoinHandle {
 
     ~JoinHandle() /*noexcept(false) todo: ensure noexcept*/ {
         if (stack_guard) {
-            executor->add_guard(stack_guard);
+            executor->add_guard(std::move(stack_guard));
         }
     }
 
@@ -719,8 +723,8 @@ public:
         return t;
     }
 
-    void add_guard(std::shared_ptr<TaskStack> x) noexcept(false) override {
-        spawned_tasks.push_back(std::move(x));
+    void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) override {
+        spawned_tasks.emplace(std::move(x));
     }
 
     void add_guard_group(std::vector<std::shared_ptr<TaskStack>> x) noexcept(
@@ -729,11 +733,12 @@ public:
     }
 
     bool remove_guard(TaskStack* x) noexcept override {
-        return std::erase_if(spawned_tasks,
-                             [x](auto const& y) {
-                                 return y.get() == x;
-                             })
-             > 0;
+        if (auto const it = spawned_tasks.find(x); it != spawned_tasks.end()) {
+            spawned_tasks.erase(it);
+            return true;
+        } else {
+            return false;
+        }
     }
 
     bool remove_guard_group(TaskStack* x) noexcept override {
@@ -769,11 +774,47 @@ private:
     using DelayedWork =
             std::pair<std::function<void()>, std::chrono::steady_clock::time_point>;
 
+    struct Hash {
+        struct is_transparent;
+
+        size_t operator()(std::shared_ptr<TaskStack> const& x) const noexcept {
+            return std::hash<TaskStack*>{}(x.get());
+        }
+
+        size_t operator()(TaskStack* x) const noexcept {
+            return std::hash<TaskStack*>{}(x);
+        }
+    };
+
+    struct Equal {
+        struct is_transparent;
+
+        bool operator()(std::shared_ptr<TaskStack> const& lhs,
+                        std::shared_ptr<TaskStack> const& rhs) const noexcept {
+            return lhs.get() == rhs.get();
+        }
+
+        bool operator()(std::shared_ptr<TaskStack> const& lhs,
+                        TaskStack* rhs) const noexcept {
+            return lhs.get() == rhs;
+        }
+
+        bool operator()(TaskStack* lhs,
+                        std::shared_ptr<TaskStack> const& rhs) const noexcept {
+            return lhs == rhs.get();
+        }
+
+        bool operator()(TaskStack* lhs, TaskStack* rhs) const noexcept {
+            return lhs == rhs;
+        }
+    };
+
     static constexpr size_t r = 10;
     std::vector<Work> tasks;
     std::vector<DelayedWork> delayed_tasks;
-    std::vector<std::shared_ptr<TaskStack>> spawned_tasks;
-    std::vector<std::vector<std::shared_ptr<TaskStack>>> spawned_task_groups;
+    std::unordered_set<std::shared_ptr<TaskStack>, Hash, Equal> spawned_tasks;
+    std::vector<std::vector<std::shared_ptr<TaskStack>>>
+            spawned_task_groups; // todo: switch to set
     size_t work{0};
 };
 
@@ -887,7 +928,7 @@ public:
         }(std::move(task));
         this->stack = task_wrapper.stack;
         task_wrapper.co.promise().continuation = caller.promise().stack;
-        current_executor->add_guard(task_wrapper.stack);
+        current_executor->add_guard(std::shared_ptr{task_wrapper.stack});
         current_executor->spawn(
                 [stack = std::weak_ptr{std::move(task_wrapper.stack)},
                  continuation = caller.promise().stack,
@@ -950,20 +991,15 @@ struct WhenAllStack {
 
         auto final_suspend() noexcept {
             struct Awaiter {
-                std::weak_ptr<TaskStack> continuation;
-                std::shared_ptr<TaskStack>
-                        continuation_locked{}; // todo: remove initialization
+                std::optional<std::shared_ptr<TaskStack>> continuation;
 
                 bool await_ready() noexcept {
-                    auto continuation = this->continuation.lock();
-                    if (!continuation
-                        || ++continuation->tasks_completed
-                                   < continuation->tasks_to_complete) {
+                    if (!continuation.has_value()
+                        || ++(*continuation)->tasks_completed
+                                   < (*continuation)->tasks_to_complete) {
                         return true;
                     }
-
-                    return schedule_on_other_ex(
-                            std::move(continuation_locked = std::move(continuation)));
+                    return schedule_on_other_ex(std::move(*continuation));
                 }
 
                 // todo: reuse
@@ -972,8 +1008,7 @@ struct WhenAllStack {
                     RPC_SCOPE_EXIT {
                         co.destroy();
                     };
-                    // todo:? maybe release
-                    return continuation_locked->erased_top().co;
+                    return (*continuation)->erased_top().co;
                 }
 
                 void await_resume() noexcept {
@@ -984,7 +1019,9 @@ struct WhenAllStack {
             rpc_assert(stack, Invariant{});
             stack->pop();
             rpc_assert(stack->size() == 0, Invariant{});
-            return Awaiter{continuation};
+
+            auto continuation = this->continuation.lock();
+            return continuation ? Awaiter{std::move(continuation)} : Awaiter{};
         }
     };
 
