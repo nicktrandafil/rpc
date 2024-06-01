@@ -7,13 +7,9 @@
 #include <coroutine>
 #include <cstdio>
 #include <cstring>
-#include <format>
 #include <functional>
-#include <iostream>
 #include <memory>
-#include <mutex>
 #include <optional>
-#include <ranges>
 #include <stack>
 #include <thread>
 #include <type_traits>
@@ -65,11 +61,13 @@ public:
         Executor* ex;
     };
 
-    TaskStack() = default; // todo: remove
+    TaskStack() = default;
 
     explicit TaskStack(ErasedFrame&& x) noexcept(false)
             : frames{std::vector{std::move(x)}} {
     }
+
+    TaskStack(TaskStack const&) = delete;
 
     void push(ErasedFrame frame) noexcept(false) {
         frames.push(frame);
@@ -92,6 +90,8 @@ public:
         return frames.top();
     }
 
+    constexpr static size_t soo_len = 24;
+
     template <class T>
     T take_result() noexcept(false) {
         rpc_assert(result_index != Result::none, Invariant{});
@@ -112,10 +112,16 @@ public:
                 static_assert(std::is_nothrow_destructible_v<T>);
 
                 RPC_SCOPE_EXIT {
-                    std::launder(reinterpret_cast<T*>(&result_value))->~T();
+                    destroy_value(result_value);
+                    destroy_value = nullptr;
                 };
 
-                return std::move(*std::launder(reinterpret_cast<T*>(&result_value)));
+                if constexpr (sizeof(T) <= soo_len) {
+                    return std::move(
+                            *std::launder(reinterpret_cast<T*>(&result_value.storage)));
+                } else {
+                    return std::move(*static_cast<T*>(result_value.ptr));
+                }
             }
         }
 
@@ -125,12 +131,22 @@ public:
     template <class T>
     void put_result(T&& val) noexcept(noexcept(std::forward<T>(val))) {
         using U = std::decay_t<T>;
-        static_assert(sizeof(val) <= sizeof(result_value));
         rpc_assert(result_index == Result::none, Invariant{});
-        new (&result_value) U(std::forward<T>(val));
-        destroy_value = +[](void* x) {
-            static_cast<U*>(x)->~U();
+
+        if constexpr (sizeof(T) <= soo_len) {
+            new (&result_value.storage) U(std::forward<T>(val));
+        } else {
+            result_value.ptr = new T{std::forward<T>(val)};
+        }
+
+        destroy_value = +[](ResultType& result_value) {
+            if constexpr (sizeof(T) <= soo_len) {
+                std::launder(reinterpret_cast<U*>(&result_value.storage))->~U();
+            } else {
+                delete static_cast<U*>(result_value.ptr);
+            }
         };
+
         result_index = Result::value;
     }
 
@@ -156,7 +172,7 @@ public:
         }
 
         if (result_index == Result::value && destroy_value != nullptr) {
-            destroy_value(&result_value);
+            destroy_value(result_value);
         }
     }
 
@@ -174,9 +190,11 @@ private:
         value,
     } result_index = Result::none;
     std::exception_ptr result_exception;
-    std::aligned_storage_t<24, alignof(std::max_align_t)> result_value;
-    void (*destroy_value)(void*) = nullptr;
-
+    union ResultType {
+        alignas(std::max_align_t) char storage[soo_len];
+        void* ptr;
+    } result_value;
+    void (*destroy_value)(ResultType&) = nullptr;
     std::stack<ErasedFrame, std::vector<ErasedFrame>>
             frames; // todo: allocator optimization
 };
@@ -197,11 +215,6 @@ inline bool schedule_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
     rpc_assert(stack, Invariant{});
     return stack->erased_top().ex != current_executor
         && (schedule(std::move(stack)), true);
-}
-
-/// \post will not move if the `stack` is not scheduled
-inline bool schedule_continuation_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
-    return !stack || schedule_on_other_ex(std::move(stack));
 }
 
 inline std::coroutine_handle<> resume(Executor* current_executor,
@@ -1068,7 +1081,7 @@ public:
                     [](...) {
                     }((schedule(std::move(other.stack)), 0)...);
 
-                    // resume imeediately
+                    // resume immediately
                     return first.co;
                 },
                 std::move(task_wrappers));
@@ -1135,8 +1148,7 @@ public:
         std::vector<typename Void<typename TaskT::promise_type::ValueType>::WrapperT> ret(
                 stacks.size());
         std::transform(begin(stacks), end(stacks), begin(ret), [](auto const& stack) {
-            return Void<typename Void<
-                    typename TaskT::promise_type::ValueType>::WrapperT>::take(*stack);
+            return Void<typename TaskT::promise_type::ValueType>::take(*stack);
         });
         return ret;
     }
