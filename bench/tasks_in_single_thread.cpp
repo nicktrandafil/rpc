@@ -10,7 +10,7 @@ using namespace std::chrono_literals;
 
 static unsigned global = 0;
 
-static rpc::Task<void> my_co_main() {
+static rpc::Task<void> when_all_10k() {
     std::vector<rpc::JoinHandle<void>> tasks;
     tasks.reserve(10'000);
     for (unsigned i = 0; i < 10'000; ++i) {
@@ -23,7 +23,7 @@ static rpc::Task<void> my_co_main() {
     co_await rpc::WhenAllDyn{std::move(tasks)};
 }
 
-static boost::asio::awaitable<void> my_co_main2() {
+static boost::asio::awaitable<void> spawn_10k() {
     for (unsigned i = 0; i < 10'000; ++i) {
         boost::asio::co_spawn(
                 co_await boost::asio::this_coro::executor,
@@ -50,11 +50,11 @@ static rpc::Task<void> my_co_main3() {
 
 int main() {
     {
-        std::cout << "my coro\n";
+        std::cout << "my coro - when all 10k with\n";
         rpc::ThisThreadExecutor exec;
 
         auto const start = std::chrono::steady_clock::now();
-        exec.block_on(my_co_main());
+        exec.block_on(when_all_10k());
         auto const end = std::chrono::steady_clock::now();
 
         std::cout << "result: " << global << "\n";
@@ -68,9 +68,9 @@ int main() {
     global = 0;
 
     {
-        std::cout << "boost coro\n";
+        std::cout << "boost coro - spawn 10k\n";
         boost::asio::io_context io;
-        boost::asio::co_spawn(io, my_co_main2(), boost::asio::detached);
+        boost::asio::co_spawn(io, spawn_10k(), boost::asio::detached);
 
         auto const start = std::chrono::steady_clock::now();
         io.run();
@@ -87,7 +87,7 @@ int main() {
     global = 0;
 
     {
-        std::cout << "my coro 3\n";
+        std::cout << "my coro - spawn 10k\n";
         rpc::ThisThreadExecutor exec;
 
         auto const start = std::chrono::steady_clock::now();

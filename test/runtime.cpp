@@ -5,7 +5,7 @@
 using namespace rpc;
 using namespace std::chrono_literals;
 
-TEST_CASE("value result", "[ThisThreadExecutor::block_on(Task<T>)]") {
+TEST_CASE("value result", "[block_on]") {
     ThisThreadExecutor executor;
     auto const x = executor.block_on([&]() -> Task<int> {
         co_return 1 + 1;
@@ -13,7 +13,7 @@ TEST_CASE("value result", "[ThisThreadExecutor::block_on(Task<T>)]") {
     REQUIRE(x == 2);
 }
 
-TEST_CASE("exception result", "[ThisThreadExecutor::block_on(Task<T>)]") {
+TEST_CASE("exception result", "[ThisThreadExecutor::block_on]") {
     ThisThreadExecutor executor;
     auto t = true;
     REQUIRE_THROWS_AS((executor.block_on([&]() -> Task<int> {
@@ -25,7 +25,7 @@ TEST_CASE("exception result", "[ThisThreadExecutor::block_on(Task<T>)]") {
                       int);
 }
 
-TEST_CASE("void result", "[ThisThreadExecutor::block_on(Task<T>)]") {
+TEST_CASE("void result", "[ThisThreadExecutor::block_on]") {
     ThisThreadExecutor executor;
     bool executed = false;
     executor.block_on([&]() -> Task<void> {
@@ -37,8 +37,7 @@ TEST_CASE("void result", "[ThisThreadExecutor::block_on(Task<T>)]") {
     REQUIRE(executed);
 }
 
-TEST_CASE("destruction order should be natural",
-          "[ThisThreadExecutor::block_on(Task<T>)]") {
+TEST_CASE("destruction order should be natural", "[ThisThreadExecutor::block_on]") {
     ThisThreadExecutor executor;
 
     int acc = 0;
@@ -62,7 +61,7 @@ TEST_CASE("destruction order should be natural",
     REQUIRE(acc == 5);
 }
 
-TEST_CASE("await for result", "[ThisThreadExecutor::spawn(Task<T>)]") {
+TEST_CASE("await for result", "[spawn]") {
     ThisThreadExecutor executor;
     executor.block_on([&]() -> Task<void> {
         auto x = co_await spawn([]() -> Task<int> {
@@ -85,7 +84,7 @@ TEST_CASE("ignore result", "[Sleep]") {
     REQUIRE(end - start < 10ms);
 }
 
-TEST_CASE("ignore result", "[ThisThreadExecutor::spawn(Task<T>)]") {
+TEST_CASE("ignore result", "[spawn]") {
     ThisThreadExecutor executor;
     bool run = false;
     executor.block_on([&]() -> Task<void> {
@@ -98,8 +97,7 @@ TEST_CASE("ignore result", "[ThisThreadExecutor::spawn(Task<T>)]") {
     REQUIRE(run);
 }
 
-TEST_CASE("use some sleep to actually enter the block_on loop",
-          "[ThisThreadExecutor::spawn(Task<T>)]") {
+TEST_CASE("use some sleep to actually enter the block_on loop", "[spawn]") {
     ThisThreadExecutor executor;
     bool run = false;
     executor.block_on([&]() -> Task<void> {
@@ -113,7 +111,7 @@ TEST_CASE("use some sleep to actually enter the block_on loop",
     REQUIRE(run);
 }
 
-TEST_CASE("abort", "[ThisThreadExecutor::spawn(Task<T>)]") {
+TEST_CASE("abort", "[spawn]") {
     ThisThreadExecutor executor;
     bool run = false;
     bool exception = false;
@@ -139,8 +137,7 @@ TEST_CASE("abort", "[ThisThreadExecutor::spawn(Task<T>)]") {
     REQUIRE(exception);
 }
 
-TEST_CASE("abort already ready task does nothing",
-          "[ThisThreadExecutor::spawn(Task<T>)]") {
+TEST_CASE("abort already ready task does nothing", "[spawn]") {
     ThisThreadExecutor executor;
     bool run = false;
     bool exception = false;
@@ -165,8 +162,7 @@ TEST_CASE("abort already ready task does nothing",
     REQUIRE(!exception);
 }
 
-TEST_CASE("the task was already completed by the abort time",
-          "[ThisThreadExecutor::spawn(Task<T>)]") {
+TEST_CASE("the task was already completed by the abort time", "[spawn]") {
     ThisThreadExecutor executor;
     bool run = false;
     bool exception = false;
@@ -201,7 +197,9 @@ TEST_CASE("the task was already completed by the abort time",
     REQUIRE(exception);
 }
 
-TEST_CASE("", "[ConditionalVariable]") {
+TEST_CASE(
+        "spawn a task and wait on cv in it, then after 5ms notify it from the outer task",
+        "[ConditionalVariable]") {
     ThisThreadExecutor executor;
     int counter = 0;
     executor.block_on([&]() -> Task<void> {
