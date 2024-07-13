@@ -3,6 +3,9 @@
 #include "contract.h"
 #include "scope_exit.h"
 
+#include <QEvent>
+#include <QObject>
+
 #include <any>
 #include <coroutine>
 #include <cstdio>
@@ -817,6 +820,58 @@ private:
     std::vector<std::vector<std::shared_ptr<TaskStack>>>
             spawned_task_groups; // todo: switch to set
     size_t work{0};
+};
+
+class QEventLoopAdapter final
+        : public Executor
+        , public QObject {
+public:
+    QEventLoopAdapter() = default;
+
+    ~QEventLoopAdapter() noexcept {
+        current_executor = nullptr;
+    }
+
+    /// \note Doesn't run QCoreApplication::exec(), you need to call it yourself
+    template <class T>
+    T block_on(Task<T>) noexcept(false) {
+        current_executor = this;
+        return rpc_todo();
+    }
+
+    void add_guard(std::shared_ptr<TaskStack>&&) noexcept(false) override {
+        rpc_todo();
+    }
+
+    void add_guard_group(std::vector<std::shared_ptr<TaskStack>>) noexcept(
+            false) override {
+        rpc_todo();
+    }
+
+    bool remove_guard(TaskStack*) noexcept override {
+        return rpc_todo();
+    }
+
+    bool remove_guard_group(TaskStack*) noexcept override {
+        return rpc_todo();
+    }
+
+private:
+    void spawn(std::function<void()>&&) override {
+        rpc_todo();
+    }
+
+    void spawn(std::function<void()>&&, std::chrono::milliseconds) override {
+        rpc_todo();
+    }
+
+    void increment_work() override {
+        rpc_todo();
+    }
+
+    void decrement_work() override {
+        rpc_todo();
+    }
 };
 
 class Sleep {

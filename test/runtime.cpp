@@ -580,3 +580,7 @@ TEST_CASE("one canceled", "[WhenAnyDyn]") {
     }());
     REQUIRE(counter == 2);
 }
+
+TEST_CASE("", "[QEventLoopExecutor]") {
+    QEventLoopAdapter executor;
+}

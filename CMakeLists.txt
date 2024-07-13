@@ -26,6 +26,11 @@ if(RPC_ABORT_ON_TODO)
 endif()
 option(RPC_WARNINGS_ARE_ERRORS "Warnings are errors" ON)
 
+find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets QUIET)
+message(STATUS "Using Qt${QT_VERSION_MAJOR}")
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED QUIET COMPONENTS Core)
+target_link_libraries(rpc INTERFACE Qt${QT_VERSION_MAJOR}::Core)
+
 add_executable(test_rpc 
     test/mpsc.cpp
     test/rpc.cpp
