@@ -18,9 +18,6 @@
 #include <variant>
 #include <vector>
 
-// hypothesis:
-// * a coroutine can have at most two references to it
-
 // todo: std::function with non trivial function object allocates, try to avoid this
 
 #define rpc_print(...) std::format_to(std::ostreambuf_iterator{std::cout}, __VA_ARGS__)
@@ -381,6 +378,7 @@ public:
     ConditionalVariable(ConditionalVariable&&) = delete;
     ConditionalVariable& operator=(ConditionalVariable&&) = delete;
 
+    /// \note Can be called from synchronous code
     void notify() noexcept {
         if (auto c = this->continuation.lock()) {
             if (c->erased_top().ex == current_executor) {

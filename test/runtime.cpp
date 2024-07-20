@@ -5,7 +5,7 @@
 using namespace rpc;
 using namespace std::chrono_literals;
 
-TEST_CASE("value result", "[block_on]") {
+TEST_CASE("value result", "[ThisThreadExecutor::block_on]") {
     ThisThreadExecutor executor;
     auto const x = executor.block_on([&]() -> Task<int> {
         co_return 1 + 1;
