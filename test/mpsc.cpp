@@ -1,10 +1,10 @@
-#include "rpc/mpsc.h"
+#include "alonite/mpsc.h"
 
-#include <rpc/scope_exit.h>
+#include <alonite/scope_exit.h>
 
 #include <catch2/catch_all.hpp>
 
-using namespace rpc;
+using namespace alonite;
 using std::chrono_literals::operator""ms;
 
 TEST_CASE("construct and send one value", "[mpsc]") {

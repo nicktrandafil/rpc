@@ -5,11 +5,11 @@
 #include <source_location>
 #include <stdexcept>
 
-namespace rpc {
+namespace alonite {
 
 struct Todo {
     [[noreturn]] Todo(std::source_location const& l) {
-#ifdef RPC_ABORT_ON_TODO
+#ifdef alonite_ABORT_ON_TODO
         static_cast<void>(l);
         std::abort();
 #else
@@ -27,14 +27,14 @@ struct Todo {
     }
 };
 
-#define rpc_todo()                                                                       \
-    rpc::Todo {                                                                          \
+#define alonite_todo()                                                                       \
+    alonite::Todo {                                                                          \
         std::source_location::current()                                                  \
     }
 
 struct Invariant {
     [[noreturn]] void failed(std::source_location const& l) {
-#ifdef RPC_ABORT_ON_INVARIANT_VIOLATION
+#ifdef alonite_ABORT_ON_INVARIANT_VIOLATION
         static_cast<void>(l);
         std::abort();
 #else
@@ -47,7 +47,7 @@ struct Invariant {
     }
 };
 
-#define rpc_assert(expr, module)                                                         \
+#define alonite_assert(expr, module)                                                         \
     ((expr) || (module.failed(std::source_location::current()), true), AnyExpr{})
 
 struct AnyExpr {
@@ -59,7 +59,7 @@ struct AnyExpr {
     }
 };
 
-#define rpc_unreachable(module)                                                          \
+#define alonite_unreachable(module)                                                          \
     (module.failed(std::source_location::current()), AnyExpr{})
 
-} // namespace rpc
+} // namespace alonite

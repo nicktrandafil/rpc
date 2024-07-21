@@ -1,4 +1,4 @@
-#include <rpc/runtime.h>
+#include <alonite/runtime.h>
 
 #include <boost/asio.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -10,17 +10,17 @@ using namespace std::chrono_literals;
 
 static unsigned global = 0;
 
-static rpc::Task<void> when_all_10k() {
-    std::vector<rpc::JoinHandle<void>> tasks;
+static alonite::Task<void> when_all_10k() {
+    std::vector<alonite::JoinHandle<void>> tasks;
     tasks.reserve(10'000);
     for (unsigned i = 0; i < 10'000; ++i) {
-        tasks.push_back(rpc::spawn([](unsigned i) -> rpc::Task<void> {
-            co_await rpc::Sleep{1ms};
+        tasks.push_back(alonite::spawn([](unsigned i) -> alonite::Task<void> {
+            co_await alonite::Sleep{1ms};
             global += i;
             co_return;
         }(i)));
     }
-    co_await rpc::WhenAllDyn{std::move(tasks)};
+    co_await alonite::WhenAllDyn{std::move(tasks)};
 }
 
 static boost::asio::awaitable<void> spawn_10k() {
@@ -37,10 +37,10 @@ static boost::asio::awaitable<void> spawn_10k() {
     }
 }
 
-static rpc::Task<void> my_co_main3() {
+static alonite::Task<void> my_co_main3() {
     for (unsigned i = 0; i < 10'000; ++i) {
-        rpc::spawn([](unsigned i) -> rpc::Task<void> {
-            co_await rpc::Sleep{1ms};
+        alonite::spawn([](unsigned i) -> alonite::Task<void> {
+            co_await alonite::Sleep{1ms};
             global += i;
             co_return;
         }(i));
@@ -51,7 +51,7 @@ static rpc::Task<void> my_co_main3() {
 int main() {
     {
         std::cout << "my coro - when all 10k with\n";
-        rpc::ThisThreadExecutor exec;
+        alonite::ThisThreadExecutor exec;
 
         auto const start = std::chrono::steady_clock::now();
         exec.block_on(when_all_10k());
@@ -88,7 +88,7 @@ int main() {
 
     {
         std::cout << "my coro - spawn 10k\n";
-        rpc::ThisThreadExecutor exec;
+        alonite::ThisThreadExecutor exec;
 
         auto const start = std::chrono::steady_clock::now();
         exec.block_on(my_co_main3());

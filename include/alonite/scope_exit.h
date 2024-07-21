@@ -5,7 +5,7 @@
 #include <exception>
 #include <utility>
 
-namespace rpc {
+namespace alonite {
 
 template <class Fn>
 struct ScopeExit : Fn {
@@ -13,7 +13,7 @@ struct ScopeExit : Fn {
         try {
             (*this)();
         } catch (...) {
-            rpc_log_error("exception durring scope exit");
+            alonite_log_error("exception durring scope exit");
         }
     }
 };
@@ -32,7 +32,7 @@ struct ScopeFail : Fn {
             try {
                 (*this)();
             } catch (...) {
-                rpc_log_error("exception during scope fail");
+                alonite_log_error("exception during scope fail");
             }
         }
     }
@@ -45,14 +45,14 @@ struct MakeScopeFail {
     }
 };
 
-} // namespace rpc
+} // namespace alonite
 
-#define RPC_CONCATENATE_IMPL(s1, s2) s1##s2
+#define ALONITE_CONCATENATE_IMPL(s1, s2) s1##s2
 
-#define RPC_CONCATENATE(s1, s2) RPC_CONCATENATE_IMPL(s1, s2)
+#define ALONITE_CONCATENATE(s1, s2) ALONITE_CONCATENATE_IMPL(s1, s2)
 
-#define RPC_UNIQUE_IDENTIFIER RPC_CONCATENATE(UNIQUE_IDENTIFIER_, __LINE__)
+#define ALONITE_UNIQUE_IDENTIFIER ALONITE_CONCATENATE(UNIQUE_IDENTIFIER_, __LINE__)
 
-#define RPC_SCOPE_EXIT auto const RPC_UNIQUE_IDENTIFIER = rpc::MakeScopeExit{}->*[&]
+#define ALONITE_SCOPE_EXIT auto const ALONITE_UNIQUE_IDENTIFIER = alonite::MakeScopeExit{}->*[&]
 
-#define RPC_SCOPE_FAIL auto const RPC_UNIQUE_IDENTIFIER = rpc::MakeScopeFail{}->*[&]
+#define ALONITE_SCOPE_FAIL auto const ALONITE_UNIQUE_IDENTIFIER = alonite::MakeScopeFail{}->*[&]

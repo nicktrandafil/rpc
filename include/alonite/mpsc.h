@@ -8,7 +8,7 @@
 #include <mutex>
 #include <optional>
 
-namespace rpc::mpsc {
+namespace alonite::mpsc {
 namespace detail {
 
 template <class T>
@@ -112,4 +112,4 @@ std::pair<UnboundSender<T>, UnboundReceiver<T>> unbound_channel() noexcept(false
     return {UnboundSender<T>{state}, UnboundReceiver<T>{std::move(state)}};
 }
 
-} // namespace rpc::mpsc
+} // namespace alonite::mpsc

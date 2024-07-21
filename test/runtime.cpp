@@ -1,8 +1,8 @@
-#include <rpc/runtime.h>
+#include <alonite/runtime.h>
 
 #include <catch2/catch_all.hpp>
 
-using namespace rpc;
+using namespace alonite;
 using namespace std::chrono_literals;
 
 TEST_CASE("value result", "[ThisThreadExecutor::block_on]") {
@@ -29,7 +29,7 @@ TEST_CASE("void result", "[ThisThreadExecutor::block_on]") {
     ThisThreadExecutor executor;
     bool executed = false;
     executor.block_on([&]() -> Task<void> {
-        RPC_SCOPE_EXIT {
+        ALONITE_SCOPE_EXIT {
             executed = true;
         };
         co_return;
@@ -173,7 +173,7 @@ TEST_CASE("the task was already completed by the abort time", "[spawn]") {
             run = true;
 
             co_await Sleep{2ms};
-            rpc_assert(hack, Invariant{});
+            alonite_assert(hack, Invariant{});
 
             // at this point, we are practically complete
             REQUIRE(hack->abort());

@@ -20,11 +20,11 @@
 
 // todo: std::function with non trivial function object allocates, try to avoid this
 
-#define rpc_print(...) std::format_to(std::ostreambuf_iterator{std::cout}, __VA_ARGS__)
+#define alonite_print(...) std::format_to(std::ostreambuf_iterator{std::cout}, __VA_ARGS__)
 
 #define feature(x, msg) x
 
-namespace rpc {
+namespace alonite {
 
 constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
     return 1024L * x;
@@ -91,15 +91,15 @@ public:
 
     template <class T>
     T take_result() noexcept(false) {
-        rpc_assert(result_index != Result::none, Invariant{});
+        alonite_assert(result_index != Result::none, Invariant{});
 
-        RPC_SCOPE_EXIT {
+        ALONITE_SCOPE_EXIT {
             result_index = Result::none;
         };
 
         switch (result_index) {
         case Result::none:
-            return static_cast<T>(rpc_unreachable(Invariant{}));
+            return static_cast<T>(alonite_unreachable(Invariant{}));
         case Result::exception:
             std::rethrow_exception(result_exception);
         case Result::value:
@@ -108,7 +108,7 @@ public:
             } else {
                 static_assert(std::is_nothrow_destructible_v<T>);
 
-                RPC_SCOPE_EXIT {
+                ALONITE_SCOPE_EXIT {
                     destroy_value(result_value);
                     destroy_value = nullptr;
                 };
@@ -122,13 +122,13 @@ public:
             }
         }
 
-        return static_cast<T>(rpc_unreachable(Invariant{}));
+        return static_cast<T>(alonite_unreachable(Invariant{}));
     }
 
     template <class T>
     void put_result(T&& val) noexcept(noexcept(std::forward<T>(val))) {
         using U = std::decay_t<T>;
-        rpc_assert(result_index == Result::none, Invariant{});
+        alonite_assert(result_index == Result::none, Invariant{});
 
         if constexpr (sizeof(T) <= soo_len) {
             new (&result_value.storage) U(std::forward<T>(val));
@@ -148,12 +148,12 @@ public:
     }
 
     void put_result() noexcept {
-        rpc_assert(result_index == Result::none, Invariant{});
+        alonite_assert(result_index == Result::none, Invariant{});
         result_index = Result::value;
     }
 
     void put_result(std::exception_ptr ptr) noexcept {
-        rpc_assert(result_index == Result::none, Invariant{});
+        alonite_assert(result_index == Result::none, Invariant{});
         result_exception = ptr;
         result_index = Result::exception;
     }
@@ -209,7 +209,7 @@ inline void schedule(std::shared_ptr<TaskStack>&& stack) {
 
 /// \post will not move if the `stack` is not scheduled
 inline bool schedule_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
-    rpc_assert(stack, Invariant{});
+    alonite_assert(stack, Invariant{});
     return stack->erased_top().ex != current_executor
         && (schedule(std::move(stack)), true);
 }
@@ -234,10 +234,10 @@ struct FinalAwaiter {
     }
 
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> co) noexcept {
-        RPC_SCOPE_EXIT {
+        ALONITE_SCOPE_EXIT {
             co.destroy();
         };
-        rpc_assert(stack, Invariant{});
+        alonite_assert(stack, Invariant{});
         return stack->erased_top().co;
     }
 
@@ -250,7 +250,7 @@ struct BasePromise {
 
     void unhandled_exception() {
         auto const stack = this->stack.lock();
-        rpc_assert(stack, Invariant{});
+        alonite_assert(stack, Invariant{});
         stack->put_result(std::current_exception());
     }
 };
@@ -263,7 +263,7 @@ struct ReturnValue {
         static_assert(std::is_convertible_v<U, T>,
                       "return expression should be convertible to return type");
         auto const stack = static_cast<PromiseT*>(this)->stack.lock();
-        rpc_assert(stack, Invariant{});
+        alonite_assert(stack, Invariant{});
         stack->template put_result<T>(std::forward<U>(val));
     }
 };
@@ -273,7 +273,7 @@ struct ReturnVoid {
     void return_void() noexcept {
         static_assert(std::is_void_v<typename PromiseT::ValueType>);
         auto const stack = static_cast<PromiseT*>(this)->stack.lock();
-        rpc_assert(stack, Invariant{});
+        alonite_assert(stack, Invariant{});
         stack->put_result();
     }
 };
@@ -327,7 +327,7 @@ public:
 
         auto final_suspend() noexcept {
             auto stack = this->stack.lock();
-            rpc_assert(stack, Invariant{});
+            alonite_assert(stack, Invariant{});
             stack->pop();
             return FinalAwaiter{std::move(stack)};
         }
@@ -343,8 +343,8 @@ public:
             std::coroutine_handle<U> caller) noexcept(false) {
         this->stack = caller.promise().stack;
         auto const stack = this->stack.lock();
-        rpc_assert(stack, Invariant{});
-        rpc_assert(co, Invariant{});
+        alonite_assert(stack, Invariant{});
+        alonite_assert(co, Invariant{});
         stack->push(TaskStack::ErasedFrame{.co = co, .ex = current_executor});
         co.promise().stack = stack;
         return co;
@@ -356,7 +356,7 @@ public:
 
     T get_result() && noexcept(false) {
         auto stack = this->stack.lock();
-        rpc_assert(stack, Invariant{});
+        alonite_assert(stack, Invariant{});
         return stack->template take_result<T>();
     }
 
@@ -504,7 +504,7 @@ struct JoinHandle {
 
         JoinHandle get_return_object() noexcept(false) {
             auto const stack = this->stack.lock();
-            rpc_assert(stack, Invariant{});
+            alonite_assert(stack, Invariant{});
             auto const co = std::coroutine_handle<promise_type>::from_promise(*this);
             stack->push(TaskStack::ErasedFrame{.co = co, .ex = current_executor});
             return JoinHandle{co, stack};
@@ -527,7 +527,7 @@ struct JoinHandle {
                 // todo: reuse
                 std::coroutine_handle<> await_suspend(
                         std::coroutine_handle<promise_type> co) noexcept {
-                    RPC_SCOPE_EXIT {
+                    ALONITE_SCOPE_EXIT {
                         co.destroy();
                     };
                     // todo:? maybe release
@@ -539,7 +539,7 @@ struct JoinHandle {
             };
 
             auto const stack = this->stack.lock();
-            rpc_assert(stack, Invariant{});
+            alonite_assert(stack, Invariant{});
             stack->pop();
             feature(current_executor->remove_guard(stack.get()),
                     "Have both abort signal and ready result set in JoinHandle in case "
@@ -563,8 +563,8 @@ struct JoinHandle {
     template <class U>
     bool await_suspend(std::coroutine_handle<U> caller) const noexcept(false) {
         auto const our_stack = this->stack.lock();
-        rpc_assert(our_stack, Invariant{});
-        rpc_assert(co, Invariant{});
+        alonite_assert(our_stack, Invariant{});
+        alonite_assert(co, Invariant{});
         if (await_ready()) {
             return false;
         } else {
@@ -662,7 +662,7 @@ public:
 
                 std::suspend_never final_suspend() const noexcept {
                     auto const stack = this->stack.lock();
-                    rpc_assert(stack, Invariant{});
+                    alonite_assert(stack, Invariant{});
                     stack->pop();
                     return {};
                 }
@@ -832,7 +832,7 @@ public:
     template <class T>
     void await_suspend(std::coroutine_handle<T> caller) {
         auto caller_stack = caller.promise().stack.lock();
-        rpc_assert(caller_stack, Invariant{});
+        alonite_assert(caller_stack, Invariant{});
         caller_stack->erased_top().ex->spawn(
                 [caller_stack = std::weak_ptr{caller_stack}]() mutable {
                     if (auto const r = caller_stack.lock()) {
@@ -894,7 +894,7 @@ public:
                         // todo: reuse
                         std::coroutine_handle<> await_suspend(
                                 std::coroutine_handle<promise_type> co) noexcept {
-                            RPC_SCOPE_EXIT {
+                            ALONITE_SCOPE_EXIT {
                                 co.destroy();
                             };
                             // todo:? maybe release
@@ -906,9 +906,9 @@ public:
                     };
 
                     auto stack = this->stack.lock();
-                    rpc_assert(stack, Invariant{});
+                    alonite_assert(stack, Invariant{});
                     stack->pop();
-                    rpc_assert(stack->size() == 0, Invariant{});
+                    alonite_assert(stack->size() == 0, Invariant{});
 
                     auto continuation = this->continuation.lock();
                     return (continuation && current_executor->remove_guard(stack.get()))
@@ -1006,7 +1006,7 @@ struct WhenAllStack {
                 // todo: reuse
                 std::coroutine_handle<> await_suspend(
                         std::coroutine_handle<> co) noexcept {
-                    RPC_SCOPE_EXIT {
+                    ALONITE_SCOPE_EXIT {
                         co.destroy();
                     };
                     return (*continuation)->erased_top().co;
@@ -1017,9 +1017,9 @@ struct WhenAllStack {
             };
 
             auto const stack = this->stack.lock();
-            rpc_assert(stack, Invariant{});
+            alonite_assert(stack, Invariant{});
             stack->pop();
-            rpc_assert(stack->size() == 0, Invariant{});
+            alonite_assert(stack->size() == 0, Invariant{});
 
             auto continuation = this->continuation.lock();
             return continuation ? Awaiter{std::move(continuation)} : Awaiter{};
@@ -1189,7 +1189,7 @@ struct WhenAnyStack {
                 // todo: reuse
                 std::coroutine_handle<> await_suspend(
                         std::coroutine_handle<> co) noexcept {
-                    RPC_SCOPE_EXIT {
+                    ALONITE_SCOPE_EXIT {
                         co.destroy();
                     };
                     // todo:? maybe release
@@ -1201,9 +1201,9 @@ struct WhenAnyStack {
             };
 
             auto stack = this->stack.lock();
-            rpc_assert(stack, Invariant{});
+            alonite_assert(stack, Invariant{});
             stack->pop();
-            rpc_assert(stack->size() == 0, Invariant{});
+            alonite_assert(stack->size() == 0, Invariant{});
 
             auto continuation = this->continuation.lock();
 
@@ -1265,7 +1265,7 @@ public:
                 task_wrappers);
 
         this->stacks = std::move(arr_vec.first);
-        rpc_assert(stacks[0].lock(), Invariant{});
+        alonite_assert(stacks[0].lock(), Invariant{});
         current_executor->add_guard_group(std::move(arr_vec.second));
 
         return std::apply(
@@ -1282,13 +1282,13 @@ public:
 
     ReturnType await_resume() noexcept(false) {
         auto const continuation = this->continuation.lock();
-        rpc_assert(continuation, Invariant{});
+        alonite_assert(continuation, Invariant{});
 
         std::optional<ReturnType> ret;
         [&]<auto... Is>(std::index_sequence<Is...>) {
             [](...) {
             }(continuation->completed_task_index == Is
-              && (rpc_assert(stacks[Is].lock(), Invariant{}),
+              && (alonite_assert(stacks[Is].lock(), Invariant{}),
                   ret = ReturnType{std::in_place_index<Is>,
                                    Void<typename std::tuple_element_t<
                                            Is,
@@ -1359,7 +1359,7 @@ public:
 
     ReturnType await_resume() noexcept(false) {
         auto const continuation = this->continuation.lock();
-        rpc_assert(continuation, Invariant{});
+        alonite_assert(continuation, Invariant{});
         return Void<typename TaskT::promise_type::ValueType>::take(
                 *stacks[continuation->completed_task_index].lock());
     }
@@ -1379,4 +1379,4 @@ inline JoinHandle<T> spawn(Task<T>&& task) noexcept(false) {
     return t;
 }
 
-} // namespace rpc
+} // namespace alonite
