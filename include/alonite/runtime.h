@@ -13,6 +13,7 @@
 #include <stack>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -20,7 +21,8 @@
 
 // todo: std::function with non trivial function object allocates, try to avoid this
 
-#define alonite_print(...) std::format_to(std::ostreambuf_iterator{std::cout}, __VA_ARGS__)
+#define alonite_print(...)                                                               \
+    std::format_to(std::ostreambuf_iterator{std::cout}, __VA_ARGS__)
 
 #define feature(x, msg) x
 
@@ -33,13 +35,19 @@ constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
 class TaskStack;
 
 struct Executor {
+    static unsigned next_id() noexcept {
+        static unsigned id = 0; // todo: atomic
+        return ++id;
+    }
+
     virtual void spawn(std::function<void()>&& task) = 0;
     virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
     virtual bool remove_guard(TaskStack* x) noexcept = 0;
     virtual void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) = 0;
-    virtual void add_guard_group(std::vector<std::shared_ptr<TaskStack>> x) noexcept(
-            false) = 0;
-    virtual bool remove_guard_group(TaskStack* x) noexcept = 0;
+    virtual void add_guard_group(
+            unsigned id,
+            std::vector<std::shared_ptr<TaskStack>> x) noexcept(false) = 0;
+    virtual bool remove_guard_group(unsigned id) noexcept = 0;
     virtual void increment_work() = 0;
     virtual void decrement_work() = 0;
     virtual ~Executor() = default;
@@ -345,7 +353,9 @@ public:
         auto const stack = this->stack.lock();
         alonite_assert(stack, Invariant{});
         alonite_assert(co, Invariant{});
-        stack->push(TaskStack::ErasedFrame{.co = co, .ex = current_executor});
+        stack->push(TaskStack::ErasedFrame{
+                .co = co, .ex = current_executor}); // Current coroutine is suspended, so
+                                                    // it is safe to modify the stack
         co.promise().stack = stack;
         return co;
     }
@@ -728,9 +738,9 @@ public:
         spawned_tasks.emplace(std::move(x));
     }
 
-    void add_guard_group(std::vector<std::shared_ptr<TaskStack>> x) noexcept(
+    void add_guard_group(unsigned id, std::vector<std::shared_ptr<TaskStack>> x) noexcept(
             false) override {
-        spawned_task_groups.push_back(std::move(x));
+        spawned_task_groups.emplace(id, std::move(x));
     }
 
     bool remove_guard(TaskStack* x) noexcept override {
@@ -742,15 +752,8 @@ public:
         }
     }
 
-    bool remove_guard_group(TaskStack* x) noexcept override {
-        return std::erase_if(spawned_task_groups,
-                             [x](auto const& group) {
-                                 return std::any_of(
-                                         begin(group), end(group), [x](auto const& y) {
-                                             return y.get() == x;
-                                         });
-                             })
-             > 0;
+    bool remove_guard_group(unsigned id) noexcept override {
+        return spawned_task_groups.erase(id) > 0;
     }
 
 private:
@@ -814,9 +817,14 @@ private:
     std::vector<Work> tasks;
     std::vector<DelayedWork> delayed_tasks;
     std::unordered_set<std::shared_ptr<TaskStack>, Hash, Equal> spawned_tasks;
-    std::vector<std::vector<std::shared_ptr<TaskStack>>>
-            spawned_task_groups; // todo: switch to set
+    std::unordered_map<unsigned, std::vector<std::shared_ptr<TaskStack>>>
+            spawned_task_groups;
     size_t work{0};
+};
+
+class ThreadPoolExecutor : public Executor {
+public:
+private:
 };
 
 class Sleep {
@@ -1168,6 +1176,7 @@ struct WhenAnyStack {
 
         std::weak_ptr<TaskStack> continuation;
         unsigned index;
+        unsigned id;
 
         std::suspend_always initial_suspend() const noexcept {
             return {};
@@ -1207,7 +1216,7 @@ struct WhenAnyStack {
 
             auto continuation = this->continuation.lock();
 
-            return (continuation && current_executor->remove_guard_group(stack.get()))
+            return (continuation && current_executor->remove_guard_group(id))
                          ? Awaiter{std::move((continuation->guard = std::move(stack),
                                               continuation)),
                                    index}
@@ -1252,21 +1261,22 @@ public:
                 },
                 std::move(tasks));
 
+        auto const id = current_executor->next_id();
         auto arr_vec = std::apply(
-                [this](auto&... stack_wrapper) {
+                [this, id](auto&... stack_wrapper) {
                     unsigned i = 0;
                     return std::pair{std::array{(stack_wrapper.co.promise().continuation =
                                                          continuation,
                                                  stack_wrapper.co.promise().index = i++,
+                                                 stack_wrapper.co.promise().id = id,
                                                  std::weak_ptr{stack_wrapper.stack})...},
-
                                      std::vector{stack_wrapper.stack...}};
                 },
                 task_wrappers);
 
         this->stacks = std::move(arr_vec.first);
         alonite_assert(stacks[0].lock(), Invariant{});
-        current_executor->add_guard_group(std::move(arr_vec.second));
+        current_executor->add_guard_group(id, std::move(arr_vec.second));
 
         return std::apply(
                 [](auto const& first, auto&&... other) {
@@ -1325,18 +1335,20 @@ public:
             x->tasks_to_complete = x->completed_task_index = this->tasks.size();
         }
 
+        auto const id = current_executor->next_id();
         std::vector<std::shared_ptr<TaskStack>> stacks(tasks.size());
         std::transform(
                 std::make_move_iterator(begin(tasks)),
                 std::make_move_iterator(end(tasks)),
                 begin(stacks),
-                [this, i = size_t(0)](TaskT&& task) mutable {
+                [this, i = size_t(0), id](TaskT&& task) mutable {
                     auto ret = [](auto task)
                             -> WhenAnyStack<typename TaskT::promise_type::ValueType> {
                         co_return co_await task;
                     }(std::move(task));
                     ret.co.promise().continuation = continuation;
                     ret.co.promise().index = i++;
+                    ret.co.promise().id = id;
                     return std::move(ret.stack);
                 });
 
@@ -1346,7 +1358,7 @@ public:
                     return std::weak_ptr{x};
                 });
 
-        current_executor->add_guard_group(stacks);
+        current_executor->add_guard_group(id, stacks);
 
         for (unsigned i = 1; i < stacks.size(); ++i) {
             schedule(std::shared_ptr(stacks[i]));
